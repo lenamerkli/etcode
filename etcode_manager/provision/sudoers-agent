@@ -1,0 +1,2 @@
+# SETTINGS.md: passwordless sudo for the agent user
+agent ALL=(ALL) NOPASSWD: ALL

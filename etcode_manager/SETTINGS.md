@@ -1,0 +1,5 @@
+- username: `agent`
+- password: (none)
+- passwordless sudo: yes
+- desktop environment: Xfce
+- Xfce settings: make it interact like Microsoft Windows

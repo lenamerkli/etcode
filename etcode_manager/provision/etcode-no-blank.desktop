@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Disable screen blanking
+Comment=Keep the VM display on; etcode VMs are used through a remote display
+Exec=xset s off -dpms
+X-Xfce-Autostart-Override=true
+Terminal=false
+NoDisplay=true
