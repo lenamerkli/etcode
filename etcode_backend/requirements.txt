@@ -1,0 +1,7 @@
+Flask>=3.1
+gunicorn>=23.0
+pydantic>=2.10
+requests>=2.32
+python-dotenv>=1.0
+filetype>=1.2
+pytest>=8.0
