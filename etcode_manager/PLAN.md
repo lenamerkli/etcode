@@ -12,7 +12,7 @@ Separate **building the template**—which can happen in Linux CI—from **creat
 
 Start with an official Debian **generic cloud image**. It already has cloud-init support; Debian recommends the `generic` variant for maximum device compatibility. Don’t confuse Debian’s `nocloud` image variant with cloud-init’s *NoCloud* configuration mechanism: the former does not run cloud-init. 
 
-For example, on a Debian build machine:
+For example, on a Debian build machine (on Fedora/RHEL use `sudo dnf install -y qemu-img guestfs-tools curl` instead; never install `libguestfs-tools` there — on modern Fedora that name is only a virtual provide of `virt-win-reg` and ships none of the `virt-*` tools):
 
 ```bash
 set -eu

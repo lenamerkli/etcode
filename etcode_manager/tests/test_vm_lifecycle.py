@@ -6,12 +6,13 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from etcode_manager.config import Settings
 from etcode_manager.qmp import QMPClient, QMPError
 from etcode_manager.seed import write_seed_iso, render_user_data
-from etcode_manager.vm import VMManager, VMError
+from etcode_manager.vm import VM, VMManager, VMError
 from etcode_manager import rfb
 
 
@@ -46,6 +47,35 @@ class SeedTest(unittest.TestCase):
             self.assertIn("inst-1234", out["meta-data"])
             self.assertIn("etcode-inst", out["meta-data"])
             self.assertIn("name: agent", out["user-data"])
+
+
+class VMDisplayTest(unittest.TestCase):
+    def test_start_advertises_1080p_to_guest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(vms_dir=Path(tmp), qemu_system=Path("qemu-system-x86_64"))
+            manager = VMManager(settings)
+            vm = VM(id="test-id", name="test")
+            vm_dir = manager.vm_dir(vm.id)
+            vm_dir.mkdir()
+            (vm_dir / "disk.qcow2").touch()
+            (vm_dir / "seed.iso").touch()
+
+            with (patch.object(settings, "require_tools"),
+                  patch("etcode_manager.vm._free_port", return_value=4444),
+                  patch("etcode_manager.vm._free_vnc_display", return_value=(0, 5900)),
+                  patch("etcode_manager.vm.QMPClient"),
+                  patch("etcode_manager.vm.subprocess.Popen") as popen):
+                popen.return_value.pid = 12345
+                popen.return_value.poll.return_value = None
+                manager.start(vm)
+                argv = popen.call_args.args[0]
+
+            self.assertEqual(argv[argv.index("-vga") + 1], "none")
+            self.assertEqual(
+                argv[argv.index("-device", argv.index("-vga")) + 1],
+                "virtio-vga,edid=on,xres=1920,yres=1080",
+            )
+            self.assertEqual(argv[argv.index("-vnc") + 1], "127.0.0.1:0")
 
 
 def _qemu_available() -> bool:

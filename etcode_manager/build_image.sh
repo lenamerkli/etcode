@@ -15,6 +15,14 @@
 #
 set -euo pipefail
 
+# The virt-* tools live in /usr/sbin on Debian-family hosts, and a non-root
+# shell (or sudo's secure_path) may not include the sbin directories.
+case ":$PATH:" in
+    *:/usr/sbin:*) ;;
+    *) PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH" ;;
+esac
+export PATH
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -85,14 +93,33 @@ run_sudo() {
 }
 
 # ---------------------------------------------------------------------------
-# 0. Host dependencies (qemu host tools + libguestfs)
+# 0. Host dependencies (qemu host tools + guestfs-tools)
 # ---------------------------------------------------------------------------
+# Binaries this script invokes; verified before and after package install.
+REQUIRED_TOOLS=(qemu-img virt-resize virt-customize)
+
+missing_tools() {
+    local tool missing=""
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+="$tool "
+        fi
+    done
+    printf '%s' "${missing% }"
+}
+
 install_host_dependencies() {
     local apt_packages=(qemu-utils guestfs-tools curl coreutils)
-    local dnf_packages=(qemu-img libguestfs-tools curl coreutils)
+    # NOTE: on modern Fedora `libguestfs-tools` is only a virtual provide of the
+    # tiny `virt-win-reg` package and contains none of the C tools. The tools
+    # (virt-resize, virt-customize, ...) ship in `guestfs-tools`, which also
+    # Provides `libguestfs-tools-c`. Never install `libguestfs-tools` here.
+    local dnf_packages=(qemu-img guestfs-tools curl coreutils)
 
-    if command -v qemu-img >/dev/null 2>&1 && command -v virt-customize >/dev/null 2>&1; then
-        log "host tools already installed (qemu-img, virt-customize)"
+    local missing
+    missing="$(missing_tools)"
+    if [ -z "$missing" ]; then
+        log "host tools already installed (${REQUIRED_TOOLS[*]})"
         return
     fi
 
@@ -105,6 +132,13 @@ install_host_dependencies() {
         run_sudo apt-get install -y "${apt_packages[@]}"
     else
         die "unsupported build host: need dnf (Fedora) or apt-get (Debian)"
+    fi
+
+    # Fail fast here, not mid-build: catches package names that resolve to
+    # something which does not actually ship the expected tools.
+    missing="$(missing_tools)"
+    if [ -n "$missing" ]; then
+        die "host tools still missing after install: $missing (expected from the 'qemu-img' and 'guestfs-tools' packages)"
     fi
 }
 
@@ -194,12 +228,23 @@ build_image() {
     run_sudo virt-resize --format qcow2 --output-format qcow2 \
         --expand "$ROOT_PARTITION" "$UPSTREAM_CACHE" "$BUILD_DISK"
 
+    # /etc/machine-id must exist but be EMPTY in the template. Inside the
+    # libguestfs appliance `cloud-init clean --machine-id` deletes the file;
+    # since the root fs is still read-only early in boot, systemd then cannot
+    # create a machine ID ("System cannot boot: Missing /etc/machine-id and
+    # /etc is mounted read-only"). Without one, systemd-networkd fails to
+    # start its DHCPv4 client (ENOENT), the NIC never gets an address and
+    # systemd-networkd-wait-online blocks the boot for its 2 min timeout.
+    # An empty file makes systemd generate a fresh, unique ID on first boot
+    # and commit it. /var/lib/dbus/machine-id must not carry the build-time
+    # ID either, so it becomes a symlink to /etc/machine-id.
     log "provisioning the image (virt-customize)"
     run_sudo virt-customize --format qcow2 -a "$BUILD_DISK" \
         --install "$(IFS=,; echo "${GUEST_PACKAGES[*]}")" \
         --copy-in "$STAGING_DIR:/tmp" \
         --run "$SCRIPT_DIR/provision/provision.sh" \
         --run-command 'cloud-init clean --logs --machine-id --seed' \
+        --run-command 'rm -f /etc/machine-id /var/lib/dbus/machine-id; : > /etc/machine-id; chmod 0444 /etc/machine-id; ln -s /etc/machine-id /var/lib/dbus/machine-id' \
         --run-command 'rm -f /etc/ssh/ssh_host_*; apt-get clean'
 
     log "writing final template $OUTPUT_IMAGE"

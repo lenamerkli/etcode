@@ -52,6 +52,34 @@ class GuiSmokeTest(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(view.is_connected)
 
+    def test_vnc_view_forwards_hover_without_click(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QImage
+        from PySide6.QtTest import QTest
+        from etcode_manager.view import VncView
+
+        class PointerClient:
+            def __init__(self):
+                self.events = []
+
+            def send_pointer(self, mask, x, y):
+                self.events.append((mask, x, y))
+
+        view = VncView()
+        view.resize(640, 400)
+        view._image = QImage(160, 100, QImage.Format.Format_RGB32)
+        view._image.fill(0)
+        client = PointerClient()
+        view._client = client
+        try:
+            view.show()
+            self.app.processEvents()  # paint the image and establish its scale
+            QTest.mouseMove(view, QPoint(200, 120))
+            self.app.processEvents()
+            self.assertEqual(client.events[-1], (0, 50, 30))
+        finally:
+            view.close()
+
     # -- screen connection vs. periodic list refresh ------------------------
 
     def _make_window_with_vms(self, tmp):

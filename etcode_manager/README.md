@@ -12,7 +12,8 @@ guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
 * **Start / stop** — QEMU is launched detached with a QMP control socket;
   stop sends an ACPI powerdown (with a hard fallback).
 * **View the screen** — a pure-Python RFB (VNC) client renders QEMU's
-  built-in VNC display inside the app.
+  built-in VNC display inside the app. The virtual display advertises
+  **1920×1080** as its preferred resolution by default.
 * **Mouse and keyboard input** — clicks, wheel and keys are forwarded to
   the guest (X11 keysym translation included).
 

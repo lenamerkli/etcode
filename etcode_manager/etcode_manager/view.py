@@ -40,6 +40,7 @@ class VncView(QWidget):
         self._offset = (0, 0)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)  # Forward pointer motion even without a pressed button.
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(QSize(640, 400))
         self._frame_ready.connect(self._set_image)

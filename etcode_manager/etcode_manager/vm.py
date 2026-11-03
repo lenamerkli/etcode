@@ -233,6 +233,10 @@ class VMManager:
             "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
             "-device", "virtio-net-pci,netdev=net0",
             "-netdev", "user,id=net0",
+            # Advertise a 1080p preferred mode to the guest via the virtual
+            # monitor's EDID, so Xfce and QEMU's VNC framebuffer use 1920x1080.
+            "-vga", "none",
+            "-device", "virtio-vga,edid=on,xres=1920,yres=1080",
             "-display", "none",
             "-vnc", f"127.0.0.1:{display}",  # TCP port 5900+display
             "-qmp", f"tcp:127.0.0.1:{vm.qmp_port},server,nowait",
