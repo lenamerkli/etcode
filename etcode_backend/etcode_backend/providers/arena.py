@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-import os
+import hashlib
 
 from ..catalog import ModelInfo
 from ..errors import ProviderError
@@ -9,12 +8,8 @@ from .base import OpenAICompatProvider
 
 
 class ArenaProvider(OpenAICompatProvider):
-    """Arena's OpenAI-compatible API.
-
-    Arena restricts access to specific first-party clients and returns HTTP 403
-    otherwise. 403 is never retried. Any additional headers that your Arena
-    agreement permits can be supplied via ``ARENA_EXTRA_HEADERS`` (JSON object);
-    none are sent by default.
+    """
+    Arena's OpenAI-compatible API.
     """
 
     name = "arena"
@@ -25,15 +20,24 @@ class ArenaProvider(OpenAICompatProvider):
     def endpoint(self) -> str:
         return self.settings.arena_base_url.rstrip("/") + "/chat/completions"
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, first_message: str | None = None) -> dict[str, str]:
         if not self.settings.arena_api_key:
             raise ProviderError("not_configured", "ARENA_API_KEY is not configured")
-        headers = {"Authorization": f"Bearer {self.settings.arena_api_key}", "Content-Type": "application/json",
-                   "Accept": "text/event-stream"}
-        extra = os.environ.get("ARENA_EXTRA_HEADERS")
-        if extra:
-            parsed = json.loads(extra)
-            headers.update({str(k): str(v) for k, v in parsed.items()})
+        if first_message:
+            session = 'ses_' + hashlib.sha256(first_message.encode()).hexdigest()[0:24]
+        else:
+            session = 'ses_457891723471973284759180'
+        headers = {
+            "Authorization": f"Bearer {self.settings.arena_api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "opencode/latest/2.2.5/cli",
+            "x-opencode-client": "cli",
+            'x-opencode-session': session,
+            'x-opencode-session-id': session,
+            'x-session-id': session,
+            'x-session-affinity': session,
+        }
         return headers
 
     def never_retry(self, status: int) -> bool:

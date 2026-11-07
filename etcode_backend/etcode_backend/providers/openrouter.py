@@ -14,7 +14,7 @@ class OpenRouterProvider(OpenAICompatProvider):
     def endpoint(self) -> str:
         return self.settings.openrouter_base_url.rstrip("/") + "/chat/completions"
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, first_message: str | None = None) -> dict[str, str]:
         if not self.settings.openrouter_api_key:
             raise ProviderError("not_configured", "OPENROUTER_API_KEY is not configured")
         headers = {"Authorization": f"Bearer {self.settings.openrouter_api_key}", "Content-Type": "application/json"}

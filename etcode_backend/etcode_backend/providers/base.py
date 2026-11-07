@@ -96,6 +96,16 @@ def _text_of(content: list[dict]) -> str:
     return "\n".join(c["text"] for c in content if c["type"] == "text")
 
 
+def _first_user_text(history: list[dict]) -> str | None:
+    """Concatenated text parts of the earliest user message (never the system
+    message), or None when the history has no user text."""
+    for msg in history:
+        if msg.get("role") == "user":
+            text = _text_of(msg.get("content") or [])
+            return text or None
+    return None
+
+
 class OpenAICompatProvider:
     name = "base"
 
@@ -106,7 +116,7 @@ class OpenAICompatProvider:
     def endpoint(self) -> str:
         raise NotImplementedError
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, first_message: str | None = None) -> dict[str, str]:
         raise NotImplementedError
 
     def extra_body(self, model: ModelInfo, options: dict) -> dict:
@@ -217,7 +227,7 @@ class OpenAICompatProvider:
     def never_retry(self, status: int) -> bool:
         return False
 
-    def _open(self, body: dict, cancel: CancelToken) -> requests.Response:
+    def _open(self, body: dict, cancel: CancelToken, first_message: str | None = None) -> requests.Response:
         started = time.monotonic()
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if cancel.cancelled:
@@ -225,7 +235,7 @@ class OpenAICompatProvider:
             error: ProviderError
             try:
                 response = requests.post(
-                    self.endpoint(), headers=self.headers(), json=body, stream=True,
+                    self.endpoint(), headers=self.headers(first_message), json=body, stream=True,
                     timeout=(self.settings.provider_connect_timeout, self.settings.provider_read_timeout),
                 )
             except (requests.ConnectionError, requests.Timeout) as exc:
@@ -257,13 +267,14 @@ class OpenAICompatProvider:
         Raises ``Cancelled`` (see ``is_cancelled``) or ProviderError.
         """
         body = self.build_body(model, self.convert_messages(history, load_image), tools, options)
+        first_message = _first_user_text(history)  # stable across turns: history is append-only
         attempt = 0
         started = time.monotonic()
         while True:
             attempt += 1
             yielded = False
             try:
-                response = self._open(body, cancel)
+                response = self._open(body, cancel, first_message)
                 cancel.on_cancel(response.close)
                 try:
                     for event in self._parse(response, cancel):

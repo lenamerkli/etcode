@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 
@@ -82,6 +83,47 @@ def test_arena_request_shape(settings, upstream):
     assert req["headers"]["Authorization"] == "Bearer arena-key"
     assert req["body"]["model"] == "coding-router-preview"
     assert req["body"]["reasoning_effort"] == "low"
+    for header in ("x-opencode-session", "x-opencode-session-id", "x-session-id", "x-session-affinity"):
+        assert req["headers"][header]  # session headers present
+
+
+def test_arena_session_affinity_from_first_user_message(settings, upstream):
+    """Session id is hashed from the first *user* message, never the system message."""
+    upstream.script = [FakeUpstream.text_reply("x")]
+    provider = get_provider("arena", settings)
+    hist = [
+        {"role": "system", "content": [{"type": "text", "text": "sys"}]},
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+    ]
+    list(provider.stream(get_model("arena-coding-router"), hist, [], {}, lambda h: None, CancelToken()))
+    expected = "ses_" + hashlib.sha256(b"hello").hexdigest()[:24]
+    req = upstream.requests[0]
+    for header in ("x-opencode-session", "x-opencode-session-id", "x-session-id", "x-session-affinity"):
+        assert req["headers"][header] == expected
+    assert req["headers"]["x-session-affinity"] != "ses_" + hashlib.sha256(b"sys").hexdigest()[:24]
+
+
+def test_arena_session_affinity_stable_across_turns(settings, upstream):
+    upstream.script = [FakeUpstream.text_reply("a"), FakeUpstream.text_reply("b")]
+    provider = get_provider("arena", settings)
+    first = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    list(provider.stream(get_model("arena-coding-router"), first, [], {}, lambda h: None, CancelToken()))
+    grown = first + [
+        {"role": "assistant", "text": {"type": "text", "text": "a"}, "reasoning": {"type": "text", "text": ""},
+         "tool_calls": [], "status": "complete", "error": None},
+        {"role": "user", "content": [{"type": "text", "text": "and now?"}]},
+    ]
+    list(provider.stream(get_model("arena-coding-router"), grown, [], {}, lambda h: None, CancelToken()))
+    expected = "ses_" + hashlib.sha256(b"hello").hexdigest()[:24]
+    assert upstream.requests[0]["headers"]["x-session-affinity"] == expected
+    assert upstream.requests[1]["headers"]["x-session-affinity"] == expected
+
+
+def test_arena_session_affinity_fallback(settings, upstream):
+    upstream.script = [FakeUpstream.text_reply("x")]
+    provider = get_provider("arena", settings)
+    list(provider.stream(get_model("arena-coding-router"), [], [], {}, lambda h: None, CancelToken()))
+    assert upstream.requests[0]["headers"]["x-session-affinity"] == "ses_457891723471973284759180"
 
 
 def test_restart_recovery_marks_interrupted(client, settings, upstream):
