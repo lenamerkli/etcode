@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etcode-desktop"
+dynamic = ["version"]
+description = "GUI for the etcode backend, for use inside an etcode VM"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.5", "requests>=2.31"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "flask>=3.1"]
+
+[project.scripts]
+etcode-desktop = "etcode_desktop.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "etcode_desktop.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["etcode_desktop*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

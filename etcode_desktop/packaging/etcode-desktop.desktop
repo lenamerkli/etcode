@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=etcode
+GenericName=etcode agent
+Comment=Chat with the etcode agent that works in this VM
+Exec=etcode-desktop
+Icon=etcode-desktop
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+StartupWMClass=etcode-desktop
+X-XFCE-Source=file:///usr/share/applications/etcode-desktop.desktop

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
  cost_total TEXT NOT NULL DEFAULT '0', unpriced_generations INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner);
+CREATE INDEX IF NOT EXISTS sessions_owner_updated ON sessions(owner, updated_at);
 CREATE TABLE IF NOT EXISTS messages (
  session_id TEXT NOT NULL REFERENCES sessions(id), idx INTEGER NOT NULL,
  body TEXT NOT NULL, created_at REAL NOT NULL,

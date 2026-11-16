@@ -25,6 +25,34 @@ def owned_session(con: sqlite3.Connection, sid: str, owner: str):
     return row
 
 
+TITLE_LENGTH = 80
+TITLE_SCAN_LIMIT = 5  # how many user messages are looked at when the first has no text (an image only)
+
+
+def pending_tool_calls(con: sqlite3.Connection, sid: str) -> list[dict]:
+    """Calls the model made that still block the session, in call order.
+
+    ``resolved`` means a result was stored (by the client, or by the backend for websearch)
+    but the barrier has not cleared yet because other calls are still missing. The result
+    content is not part of the metadata.
+    """
+    rows = con.execute("SELECT call_id,call_name,arguments,result FROM pending_tool_calls WHERE session_id=? ORDER BY call_order", (sid,))
+    return [{"id": r["call_id"], "name": r["call_name"], "arguments": loads(r["arguments"]), "resolved": r["result"] is not None}
+            for r in rows]
+
+
+def session_title(con: sqlite3.Connection, sid: str) -> str | None:
+    """The start of the first user message that has text, whitespace collapsed. Queued messages don't count."""
+    rows = con.execute("SELECT body FROM messages WHERE session_id=? AND json_extract(body,'$.role')='user' ORDER BY idx LIMIT ?",
+                       (sid, TITLE_SCAN_LIMIT))
+    for row in rows:
+        parts = loads(row["body"]).get("content", [])
+        text = " ".join(" ".join(p.get("text", "") for p in parts if p.get("type") == "text").split())
+        if text:
+            return text[:TITLE_LENGTH]
+    return None
+
+
 def session_metadata(con: sqlite3.Connection, row) -> dict:
     sid = row["id"]
     count = con.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (sid,)).fetchone()[0]
@@ -35,7 +63,21 @@ def session_metadata(con: sqlite3.Connection, row) -> dict:
             "queued_count": queued, "active_generation_id": active["id"] if active else None,
             "cost": {"currency": "USD", "total": float(Decimal(row["cost_total"])), "total_exact": row["cost_total"],
                      "unpriced_generations": row["unpriced_generations"]},
+            "pending_tool_calls": pending_tool_calls(con, sid),
             "created_at": row["created_at"], "updated_at": row["updated_at"]}
+
+
+def list_sessions(con: sqlite3.Connection, owner: str, limit: int, offset: int) -> tuple[list[dict], int]:
+    """The owner's sessions, most recently active first, plus the total number. Each has a ``title``."""
+    total = con.execute("SELECT COUNT(*) FROM sessions WHERE owner=?", (owner,)).fetchone()[0]
+    rows = con.execute("SELECT * FROM sessions WHERE owner=? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                       (owner, limit, offset)).fetchall()
+    sessions = []
+    for row in rows:
+        meta = session_metadata(con, row)
+        meta["title"] = session_title(con, row["id"])
+        sessions.append(meta)
+    return sessions, total
 
 
 def create_session(con: sqlite3.Connection, owner: str, request: SessionCreate) -> dict:

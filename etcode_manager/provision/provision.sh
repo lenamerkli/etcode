@@ -4,7 +4,9 @@
 #
 # Installs the etcode payload that build_image.sh staged at /tmp/staging and
 # applies the SETTINGS.md configuration (user `agent`, passwordless sudo,
-# Xfce with a Windows-like taskbar, VSCodium).
+# Xfce with a Windows-like taskbar, VSCodium) and installs the etcode desktop app
+# (code in /opt/etcode/etcode_desktop, dependencies in /opt/etcode/.venv, launcher,
+# autostart and panel entry).
 #
 set -euo pipefail
 
@@ -41,6 +43,43 @@ chmod +x /home/agent/scripts/*.sh
 cp -a "$STAGING/opt/etcode" /opt/etcode
 log "creating python venv /opt/etcode/.venv"
 python3 -m venv /opt/etcode/.venv
+
+# ---------------------------------------------------------------------------
+# etcode desktop app (PySide6 GUI). The code was copied to /opt/etcode/etcode_desktop with
+# the rest of /opt/etcode; the launcher runs it with PYTHONPATH, so only its dependencies
+# are installed. PySide6-Essentials has everything the app imports (QtCore, QtGui,
+# QtWidgets, QtNetwork) without the large Addons package.
+# ---------------------------------------------------------------------------
+log "installing the etcode desktop app dependencies into /opt/etcode/.venv"
+/opt/etcode/.venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
+    "PySide6-Essentials>=6.5,<7" "requests>=2.31"
+
+log "checking the etcode desktop app (virt-customize does not show warnings from --run scripts)"
+qt_dir="$(/opt/etcode/.venv/bin/python -c 'import os, PySide6; print(os.path.dirname(PySide6.__file__))')/Qt"
+missing_libs="$(LD_LIBRARY_PATH="$qt_dir/lib" ldd "$qt_dir/plugins/platforms/libqxcb.so" | grep 'not found' || true)"
+if [ -n "$missing_libs" ]; then
+    echo "ERROR: the Qt xcb platform plugin is missing system libraries:" >&2
+    echo "$missing_libs" >&2
+    exit 1
+fi
+QT_QPA_PLATFORM=offscreen PYTHONPATH=/opt/etcode/etcode_desktop /opt/etcode/.venv/bin/python -c '
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+import PySide6.QtNetwork, requests, etcode_desktop.__main__
+'
+
+log "installing the etcode desktop launcher, menu entry, icon and autostart"
+install -m 0755 "$STAGING/usr/local/bin/etcode-desktop" /usr/local/bin/etcode-desktop
+install -m 0644 "$STAGING/usr/share/applications/etcode-desktop.desktop" \
+    /usr/share/applications/etcode-desktop.desktop
+install -D -m 0644 "$STAGING/usr/share/icons/hicolor/scalable/apps/etcode-desktop.svg" \
+    /usr/share/icons/hicolor/scalable/apps/etcode-desktop.svg
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true
+fi
+install -D -m 0644 "$STAGING/etc/xdg/autostart/etcode-desktop.desktop" \
+    /etc/xdg/autostart/etcode-desktop.desktop
+# No /etc/etcode here and no token: cloud-init write_files creates /etc/etcode/desktop.json per VM (seed.py).
 
 log "installing Xfce configuration"
 cp -a "$STAGING/home/agent/.config" /home/agent/.config
@@ -96,7 +135,7 @@ apt-get install -y codium
 # does not show warnings from --run scripts)
 # ---------------------------------------------------------------------------
 missing=0
-for desktop_file in firefox-esr thunar xfce4-terminal com.visualstudio.CodeOSS; do
+for desktop_file in firefox-esr thunar xfce4-terminal com.visualstudio.CodeOSS etcode-desktop; do
     if [ ! -e "/usr/share/applications/${desktop_file}.desktop" ]; then
         echo "ERROR: /usr/share/applications/${desktop_file}.desktop not found;" \
              "its quick-launch entry would not appear on the panel" >&2

@@ -47,6 +47,10 @@ IMAGE_NAME="etcode-base-${IMAGE_VERSION}-amd64"
 TEMPLATE_DISK_SIZE="10G"
 ROOT_PARTITION="/dev/sda1"    # root partition of the generic cloud image
 
+# The etcode desktop app (PySide6 GUI) that is installed into the image and autostarted. Its packaging/
+# directory holds the launcher, the .desktop files and the icon.
+DESKTOP_DIR="${DESKTOP_DIR:-$SCRIPT_DIR/../etcode_desktop}"
+
 WORK_DIR="$SCRIPT_DIR/build"
 OUT_DIR="$SCRIPT_DIR/out"
 UPSTREAM_CACHE="$WORK_DIR/$UPSTREAM_NAME"
@@ -72,6 +76,12 @@ GUEST_PACKAGES=(
     firefox-esr thunar xfce4-terminal
     # passwordless sudo
     sudo
+    # Qt (PySide6 wheels) for the etcode desktop app: the xcb platform plugin and OpenGL/EGL need these.
+    # Verified with `ldd` on libqxcb.so of PySide6 6.12 on Debian 13; provision.sh checks again in the image.
+    libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3
+    libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0
+    libxcb-render-util0 libxcb-shape0 libxcb-util1 libxcb-xkb1 libxcb-xfixes0
+    libxcb-sync1 libxcb-xinerama0
     # needed inside the guest to set up the VSCodium apt repository
     wget gnupg
 )
@@ -216,6 +226,41 @@ stage_payload() {
     mkdir -p "$STAGING_DIR/etc/xdg/autostart"
     cp -a "$SCRIPT_DIR/provision/etcode-no-blank.desktop" \
         "$STAGING_DIR/etc/xdg/autostart/etcode-no-blank.desktop"
+
+    stage_desktop_app
+}
+
+# The etcode desktop app: the code (without tests and caches) -> /opt/etcode/etcode_desktop, the launcher ->
+# /usr/local/bin, menu entry + icon -> /usr/share, autostart entry -> /etc/xdg/autostart (the same mechanism as
+# etcode-no-blank.desktop), and a quick-launch item for the panel (plugin 11 in xfce4-panel.xml). Its Python
+# dependencies are installed into the venv by provision.sh. No token goes into the image: the manager delivers it
+# per VM through cloud-init (seed.py).
+stage_desktop_app() {
+    local packaging="$DESKTOP_DIR/packaging"
+    if [ ! -f "$DESKTOP_DIR/pyproject.toml" ] || [ ! -d "$DESKTOP_DIR/etcode_desktop" ]; then
+        die "etcode_desktop not found in $DESKTOP_DIR (set DESKTOP_DIR)"
+    fi
+    [ -d "$packaging" ] || die "$packaging not found"
+
+    mkdir -p \
+        "$STAGING_DIR/opt/etcode/etcode_desktop" \
+        "$STAGING_DIR/usr/local/bin" \
+        "$STAGING_DIR/etc/xdg/autostart" \
+        "$STAGING_DIR/usr/share/applications" \
+        "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps" \
+        "$STAGING_DIR/home/agent/.config/xfce4/panel/launcher-11"
+    (cd "$DESKTOP_DIR" && tar --exclude='__pycache__' --exclude='*.pyc' -cf - \
+        etcode_desktop pyproject.toml requirements.txt README.md) \
+        | tar -C "$STAGING_DIR/opt/etcode/etcode_desktop" -xf -
+    install -m 0755 "$packaging/etcode-desktop" "$STAGING_DIR/usr/local/bin/etcode-desktop"
+    install -m 0644 "$packaging/etcode-desktop.desktop" \
+        "$STAGING_DIR/usr/share/applications/etcode-desktop.desktop"
+    install -m 0644 "$packaging/etcode-desktop.svg" \
+        "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/etcode-desktop.svg"
+    install -m 0644 "$packaging/etcode-desktop-autostart.desktop" \
+        "$STAGING_DIR/etc/xdg/autostart/etcode-desktop.desktop"
+    install -m 0644 "$packaging/etcode-desktop.desktop" \
+        "$STAGING_DIR/home/agent/.config/xfce4/panel/launcher-11/17929499125.desktop"
 }
 
 # ---------------------------------------------------------------------------

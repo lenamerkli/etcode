@@ -31,12 +31,13 @@ class ArenaProvider(OpenAICompatProvider):
             "Authorization": f"Bearer {self.settings.arena_api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
-            "User-Agent": "opencode/latest/2.2.5/cli",
+            "User-Agent": "opencode/latest/2.2.6/cli",
             "x-opencode-client": "cli",
             'x-opencode-session': session,
             'x-opencode-session-id': session,
             'x-session-id': session,
             'x-session-affinity': session,
+            'x-opencode-project': hashlib.sha256(session.encode()).hexdigest()[0:40]
         }
         return headers
 

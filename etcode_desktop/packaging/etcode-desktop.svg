@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#2b3a67"/>
+  <path d="M30 40a10 10 0 0 1 10-10h48a10 10 0 0 1 10 10v34a10 10 0 0 1-10 10H62L44 98V84h-4a10 10 0 0 1-10-10z" fill="#ffffff"/>
+  <text x="64" y="73" font-family="DejaVu Sans, sans-serif" font-size="38" font-weight="bold" text-anchor="middle" fill="#2b3a67">e</text>
+</svg>

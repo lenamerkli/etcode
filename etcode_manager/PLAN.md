@@ -156,3 +156,23 @@ Two important management rules:
 - **Keep base images at stable paths:** the example records an absolute backing-file path, so an overlay alone is not a portable export. 
 
 **My starting stack would be:** Debian generic cloud image → `virt-customize` build script → versioned QCOW2 template → per-VM overlay and NoCloud seed. If provisioning requires a fully booted system rather than a chroot, use **Packer’s QEMU builder** for the image-building stage instead. 
+
+
+## 4. The etcode desktop app in the image
+
+The template also carries the etcode desktop app (`../etcode_desktop`, see its `PLAN.md`, sections 8 and 9). The
+manager only prepares the VM for it; it never starts it.
+
+* **Build** (`build_image.sh`, `provision/provision.sh`): the app goes to `/opt/etcode/etcode_desktop` and its
+  dependencies (`PySide6-Essentials`, `requests`) into the existing venv `/opt/etcode/.venv`. The Qt system
+  libraries are installed with the other guest packages. `provision.sh` fails the build if the xcb plugin lacks a
+  library or if the app cannot be imported. The launcher (`/usr/local/bin/etcode-desktop`), menu entry and icon
+  come from `etcode_desktop/packaging/`. The autostart entry goes to `/etc/xdg/autostart/` (like
+  `etcode-no-blank.desktop`), and a quick-launch button is plugin 11 of the panel layout.
+* **Per VM** (`seed.py`): the backend URL and token of the VM (kept in its `vm.json`) become a cloud-init
+  `write_files` entry for `/etc/etcode/desktop.json`, owner `agent`, mode 0600, `defer: true`. No token is ever in
+  the template. cloud-init writes the file once per instance id, so a changed token reaches a VM that has booted
+  only through the app's own connection dialog.
+* **Race on first boot**: `defer: true` writes the file in cloud-init's last stage, and the autostart can be
+  earlier. The autostart entry therefore uses `etcode-desktop --wait-for-provisioning` (wait for the file or for
+  `/run/cloud-init/result.json`, 60 s at most).

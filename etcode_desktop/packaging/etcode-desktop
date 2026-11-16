@@ -1,0 +1,55 @@
+#!/bin/sh
+# etcode-desktop - starts the etcode desktop app inside an etcode VM.
+#
+# Installed as /usr/local/bin/etcode-desktop by the image build. The app lives in /opt/etcode/etcode_desktop and
+# runs with the python of the venv in /opt/etcode/.venv, which holds PySide6 and requests.
+#
+#   etcode-desktop [--wait-for-provisioning] [app options...]
+#
+#   --wait-for-provisioning   (used by autostart) First wait until cloud-init has delivered
+#                             /etc/etcode/desktop.json, or has finished, or ETCODE_PROVISIONING_WAIT seconds
+#                             (60) have passed. Without it the first boot can start the app before the token
+#                             exists, and the app would ask for one.
+#
+# Everything else is passed to `python -m etcode_desktop` (see `etcode-desktop --help`).
+#
+# Environment (all optional):
+#   ETCODE_DESKTOP_HOME         where the app is installed        (/opt/etcode/etcode_desktop)
+#   ETCODE_PYTHON               the python to run it with         (/opt/etcode/.venv/bin/python)
+#   ETCODE_PROVISIONED_FILE     file that the manager provisions  (/etc/etcode/desktop.json)
+#   ETCODE_CLOUD_INIT_RUN_DIR   cloud-init's runtime directory    (/run/cloud-init)
+#   ETCODE_PROVISIONING_WAIT    seconds to wait at most           (60)
+#   QT_QPA_PLATFORM             the Qt platform                   (xcb)
+
+app_home="${ETCODE_DESKTOP_HOME:-/opt/etcode/etcode_desktop}"
+python="${ETCODE_PYTHON:-/opt/etcode/.venv/bin/python}"
+
+wait_for_provisioning() {
+    provisioned="${ETCODE_PROVISIONED_FILE:-/etc/etcode/desktop.json}"
+    run_dir="${ETCODE_CLOUD_INIT_RUN_DIR:-/run/cloud-init}"
+    limit="${ETCODE_PROVISIONING_WAIT:-60}"
+    case "$limit" in
+        ''|*[!0-9]*) limit=60 ;;
+    esac
+    waited=0
+    # cloud-init writes result.json when it has finished all its stages. Without a runtime directory there is no
+    # cloud-init to wait for (a VM that is not made by the manager, a development machine).
+    while [ ! -e "$provisioned" ] && [ -d "$run_dir" ] && [ ! -e "$run_dir/result.json" ] && [ "$waited" -lt "$limit" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+if [ "${1:-}" = "--wait-for-provisioning" ]; then
+    shift
+    wait_for_provisioning
+fi
+
+if [ ! -x "$python" ]; then
+    echo "etcode-desktop: $python not found. Is the app installed in this image?" >&2
+    exit 1
+fi
+
+export PYTHONPATH="$app_home${PYTHONPATH:+:$PYTHONPATH}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+exec "$python" -m etcode_desktop "$@"

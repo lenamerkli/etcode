@@ -46,7 +46,8 @@ Errors look like `{"error": {"code": "...", "message": "..."}}`.
 | --- | --- |
 | `GET /models` | Curated catalog. `available` is false when the provider key is missing. |
 | `POST /session` | `{"model": tech_name, "websearch": bool, "temperature"?, "max_tokens"?, "reasoning_effort"?}` returns metadata (201). |
-| `GET /session/<id>` | Metadata only, with `status` set to `idle`, `generating`, `awaiting_tools` or `failed`, and the accumulated `cost` (see below). |
+| `GET /sessions` | The caller's sessions, most recently active first: `{"sessions": [...], "total": n}`. Each entry is the same metadata as `GET /session/<id>` plus a `title` (the first 80 characters of the first user message that has text, whitespace collapsed, or `null`). Query: `limit` (1 to 500, default 100) and `offset` (0 to 1000000). Other values give 400 `invalid_number`. Sessions can't be deleted. |
+| `GET /session/<id>` | Metadata only, with `status` set to `idle`, `generating`, `awaiting_tools` or `failed`, the accumulated `cost` (see below) and `pending_tool_calls` (see "Tool calls"). |
 | `PATCH /session/<id>/model` | `{"model": tech_name}`. Only allowed when idle/failed and the image support of both models matches. |
 | `POST /session/<id>/message` | One message, plus optional inference overrides as sibling keys. |
 | `POST /session/<id>/messages` | `{"messages": [...], overrides...}`. Do not mix user messages and tool results in one batch. |
@@ -74,7 +75,12 @@ history after the current turn (including any tool-call chain) finishes.
 
 ### Tool calls
 
-When the model calls tools, the session goes to `awaiting_tools`. Run the client
+When the model calls tools, the session goes to `awaiting_tools`. The session metadata
+then lists the calls that still block it in `pending_tool_calls`:
+`[{"id", "name", "arguments", "resolved"}]` in call order. `resolved` is true when a result has
+been stored (by the client, or by the backend for `websearch`) but other calls are still missing.
+The result itself is not included, and the list is empty when nothing is pending. A client that
+restarts can use it to see which calls it still has to run. Run the client
 tools and post one `tool` message per call. You can post them in any order. They
 are added to the history in call order once all of them have arrived, and then
 generation resumes. `websearch` runs in the backend, so do not answer it. If

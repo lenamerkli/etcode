@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=etcode
+Comment=Starts the etcode desktop app when the session starts
+Exec=etcode-desktop --wait-for-provisioning --maximized
+Icon=etcode-desktop
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-Delay=2
+X-Xfce-Autostart-Override=true

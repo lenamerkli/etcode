@@ -5,7 +5,7 @@ Layout per VM (see PLAN.md):
     vms/<instance-id>/
         disk.qcow2   — writable overlay backed by the immutable base image
         seed.iso     — cloud-init NoCloud CIDATA seed
-        vm.json      — metadata (name, resources, instance-id, ports)
+        vm.json      — metadata (name, resources, instance-id, ports, backend URL and token; mode 0600)
         qemu.log     — guest console / QEMU stderr
 
 VM state is discovered by scanning the vms directory, so it survives
@@ -24,10 +24,10 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, normalize_backend_token, normalize_backend_url
 from .qmp import QMPClient, QMPError
 from .seed import write_seed_iso
 
@@ -52,6 +52,10 @@ class VM:
     qmp_port: int = 0
     pid: int = 0             # QEMU PID while running (survives app restarts)
     status: str = "stopped"  # runtime: stopped | running
+    # The desktop app inside the VM gets these from the cloud-init seed. They are kept here because the seed
+    # needs them whenever it is regenerated. The token is a secret: vm.json is private, and it stays out of repr().
+    backend_url: str = ""
+    backend_token: str = field(default="", repr=False)
 
     @property
     def hostname(self) -> str:
@@ -133,8 +137,24 @@ class VMManager:
         return vms
 
     def _save(self, vm: VM) -> None:
+        """Write vm.json. It may hold the backend token, so it is created private (0600) and replaced atomically."""
         path = self.vm_dir(vm.id) / VM_JSON
-        path.write_text(json.dumps(asdict(vm), indent=2), encoding="utf-8")
+        tmp = path.with_name(VM_JSON + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(asdict(vm), indent=2))
+            try:
+                os.chmod(tmp, 0o600)  # a leftover temp file keeps its old mode otherwise
+            except OSError:
+                pass  # not every file system has modes (Windows)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     # -- create -------------------------------------------------------------
 
@@ -144,14 +164,27 @@ class VMManager:
         cpus: int = 2,
         memory_mb: int = 2048,
         disk_gb: int = 20,
+        backend_url: str | None = None,
+        backend_token: str | None = None,
     ) -> VM:
-        """Create a new VM: overlay disk + cloud-init seed ISO."""
+        """Create a new VM: overlay disk + cloud-init seed ISO.
+
+        ``backend_url`` and ``backend_token`` are what the desktop app inside the VM will use. ``None`` means the
+        defaults from the settings (``config.json``); an empty URL means the default URL, an empty token means none.
+        """
         self.settings.require_tools()
         name = name.strip()
         if not _NAME_RE.match(name):
             raise VMError(
                 "Invalid name: use letters, digits, spaces, '.', '_' or '-' (max 64 chars)."
             )
+        try:
+            backend_url = normalize_backend_url(self.settings.backend_url if backend_url is None else backend_url)
+            backend_token = normalize_backend_token(
+                self.settings.backend_token if backend_token is None else backend_token
+            )
+        except ValueError as exc:
+            raise VMError(str(exc)) from exc
         if any(vm.name == name for vm in self.list()):
             raise VMError(f"A VM named '{name}' already exists.")
         if not self.settings.base_image.exists():
@@ -161,7 +194,7 @@ class VMManager:
             )
 
         vm = VM(id=str(uuid.uuid4()), name=name, cpus=cpus, memory_mb=memory_mb,
-                disk_gb=disk_gb, created=time.time())
+                disk_gb=disk_gb, created=time.time(), backend_url=backend_url, backend_token=backend_token)
         vm_dir = self.vm_dir(vm.id)
         vm_dir.mkdir(parents=True, exist_ok=False)
         disk = vm_dir / "disk.qcow2"
@@ -176,20 +209,25 @@ class VMManager:
                 str(self.settings.qemu_img), "resize", "-f", "qcow2",
                 str(disk), f"{disk_gb}G",
             ])
-            write_seed_iso(
-                vm_dir / "seed.iso",
-                instance_id=vm.id,
-                hostname=vm.hostname,
-                ssh_authorized_keys=(self.settings.ssh_public_key,)
-                if self.settings.ssh_public_key else (),
-            )
+            self.write_seed(vm)
+            self._save(vm)
         except Exception:
             # Clean up partial state so the registry stays consistent.
             import shutil
             shutil.rmtree(vm_dir, ignore_errors=True)
             raise
-        self._save(vm)
         return vm
+
+    def write_seed(self, vm: VM) -> Path:
+        """(Re)generate the cloud-init seed of a VM from its stored settings. The instance id never changes."""
+        return write_seed_iso(
+            self.vm_dir(vm.id) / "seed.iso",
+            instance_id=vm.id,
+            hostname=vm.hostname,
+            ssh_authorized_keys=(self.settings.ssh_public_key,) if self.settings.ssh_public_key else (),
+            backend_url=vm.backend_url,
+            backend_token=vm.backend_token,
+        )
 
     def delete(self, vm: VM) -> None:
         """Stop (if needed) and remove a VM with all its data."""

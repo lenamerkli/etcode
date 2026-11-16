@@ -27,16 +27,35 @@ DEFAULT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file. If both start_line and start_char are provided, the one further from the start will be used. If both end_line and end_char are provided, the one further from the end will be used.",
+            "description": (
+                "Read the contents of a file. Reading starts at start_line or start_char, whichever comes later, "
+                "and stops at whichever of end_line, end_char or max_chars is reached first. "
+                "Parameters you omit use their defaults, so a call with only a path returns at most the first "
+                "1000 lines and the first 100000 characters; to read more of a large file, set end_line and "
+                "end_char explicitly. The result reports which part of the file was read (first_char, last_char, "
+                "first_line, last_line) and how much was left out, before and after that part "
+                "(unread_chars, unread_lines)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "The path to the file to read"},
-                    "start_line": {"type": "integer", "description": "The line to start reading from, 1-indexed", "default": 1},
-                    "end_line": {"type": "integer", "description": "The line to end reading at", "default": 1000},
-                    "max_chars": {"type": "integer", "description": "The maximum number of characters to read", "default": 1000000},
-                    "start_char": {"type": "integer", "description": "The character to start reading from, 0-indexed", "default": 0},
-                    "end_char": {"type": "integer", "description": "The character to end reading at", "default": 100000},
+                    "start_line": {"type": "integer", "default": 1, "description": (
+                        "The line to start reading from, 1-indexed. If start_char is later in the file, "
+                        "start_char is used instead.")},
+                    "end_line": {"type": "integer", "default": 1000, "description": (
+                        "The last line to read, inclusive and 1-indexed. Reading stops at the end of this line "
+                        "or at end_char, whichever comes first.")},
+                    "max_chars": {"type": "integer", "default": 1000000, "description": (
+                        "The maximum number of characters to read, counted from the start position.")},
+                    "start_char": {"type": "integer", "default": 0, "description": (
+                        "The character offset to start reading from, 0-indexed. If start_line begins later in "
+                        "the file, start_line is used instead.")},
+                    "end_char": {"type": "integer", "default": 100000, "description": (
+                        "The character offset at which reading stops: an absolute, 0-indexed position in the "
+                        "file, exclusive. Reading stops here or at the end of end_line, whichever comes first. "
+                        "The default of 100000 means that a read starting after character 100000 returns "
+                        "nothing unless this is raised.")},
                 },
                 "required": ["path"],
             },

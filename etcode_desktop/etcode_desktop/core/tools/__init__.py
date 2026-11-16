@@ -1,0 +1,92 @@
+"""Run the tool calls that the model makes: bash, read_file, write_to_file, replace_in_file and view_image.
+
+:func:`execute_tool` is the one entry point. It checks the arguments against the tool's schema, runs the
+tool, and always returns content parts for the tool result. It never raises, because the session waits for a
+result for every call: a bad call, a failing command or a bug in a tool all become an ``Error: ...`` text.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..api import BackendClient
+from ..models import text_part
+from .bash import run_bash
+from .cancel import CancelToken
+from .files import FileToolError, read_file, replace_in_file, resolve_path, write_to_file
+from .image import view_image
+from .schemas import TOOL_NAMES, ToolArgumentError, explicit, validate_arguments
+
+log = logging.getLogger(__name__)
+
+__all__ = ["CancelToken", "ToolContext", "execute_tool", "TOOL_NAMES", "error_text"]
+
+
+@dataclass
+class ToolContext:
+    client: BackendClient | None = None  # view_image uploads through it
+    cancel: CancelToken = field(default_factory=CancelToken)
+    home: Path = field(default_factory=Path.home)  # relative paths are relative to this
+
+
+def error_text(message: str) -> list[dict[str, Any]]:
+    return [text_part(f"Error: {message}")]
+
+
+def execute_tool(name: str, arguments: dict[str, Any], context: ToolContext) -> list[dict[str, Any]]:
+    """The content parts of the result of one tool call."""
+    try:
+        args = validate_arguments(name, arguments)
+        return _run(name, args, arguments, context)
+    except ToolArgumentError as exc:
+        return error_text(f"invalid call of {name}: {exc}")
+    except FileToolError as exc:
+        return error_text(str(exc))
+    except Exception as exc:  # a bug in a tool must still give the model an answer
+        log.exception("the tool %s failed", name)
+        return error_text(f"the tool {name} failed: {type(exc).__name__}: {exc}")
+
+
+def _run(name: str, args: dict[str, Any], given: dict[str, Any], context: ToolContext) -> list[dict[str, Any]]:
+    home = context.home
+    if name == "bash":
+        if args["timeout"] < 1:
+            raise ToolArgumentError("timeout must be at least 1 second")
+        if args["max_chars"] < 1:
+            raise ToolArgumentError("max_chars must be at least 1")
+        directory = resolve_path(args["directory"], home)
+        if not explicit(given, "directory") and not directory.is_dir():
+            directory = home  # the default directory belongs to the VM: elsewhere, the home directory will do
+        venv = None
+        if explicit(given, "venv"):
+            venv = resolve_path(args["venv"], home)
+            if not (venv / "bin").is_dir():
+                raise FileToolError(f"the virtual environment {args['venv']} does not exist (no bin directory)")
+        if not directory.is_dir():
+            from .bash import format_result
+            return [text_part(format_result(-1, f"cannot start the command: the directory {args['directory']} does not exist", ""))]
+        return [text_part(run_bash(args["command"], args["timeout"], directory, venv, args["max_chars"], context.cancel))]
+    if name == "read_file":
+        return [text_part(read_file(args["path"], args["start_line"], args["end_line"], args["max_chars"],
+                                    args["start_char"], args["end_char"], home))]
+    if name == "write_to_file":
+        return [text_part(write_to_file(args["path"], args["content"], home))]
+    if name == "replace_in_file":
+        return [text_part(replace_in_file(args["path"], args["search"], args["replace"], bool(args.get("read", False)), home))]
+    if name == "view_image":
+        if context.client is None:
+            raise FileToolError("images cannot be uploaded: there is no connection to the backend")
+        return view_image(args["path"], home, context.client)
+    raise ToolArgumentError(f"unknown tool '{name}'")  # unreachable: validate_arguments knows the names
+
+
+def path_key(name: str, arguments: dict[str, Any], home: Path) -> str | None:
+    """What calls are ordered by: the real path that a file tool works on (None for other tools)."""
+    if name in ("read_file", "write_to_file", "replace_in_file"):
+        path = arguments.get("path")
+        if isinstance(path, str) and path:
+            return os.path.realpath(resolve_path(path, home))
+    return None

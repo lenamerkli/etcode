@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import html
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QMessageBox, QSplitter,
     QStatusBar, QSpinBox, QDialog, QDialogButtonBox, QFormLayout,
-    QLineEdit,
+    QLineEdit, QCheckBox,
 )
 
-from .config import Settings, detect_accel
+from .config import (
+    DEFAULT_BACKEND_URL, Settings, detect_accel, normalize_backend_token, normalize_backend_url,
+)
 from .vm import VM, VMManager, VMError
 from .view import VncView
 
 
 class NewVMDialog(QDialog):
-    """Collects name and resources for a new VM."""
+    """Collects name, resources and the backend settings for a new VM.
 
-    def __init__(self, parent=None):
+    The backend URL and token are what the etcode desktop app inside the VM will use. They are prefilled with the
+    defaults from ``config.json`` and can be changed per VM (for example to give one VM its own token).
+    """
+
+    def __init__(self, parent=None, backend_url: str = DEFAULT_BACKEND_URL, backend_token: str = ""):
         super().__init__(parent)
         self.setWindowTitle("New VM")
         form = QFormLayout(self)
@@ -46,6 +54,42 @@ class NewVMDialog(QDialog):
         self.disk.setSuffix(" GB")
         form.addRow("Disk:", self.disk)
 
+        self.backend_url_edit = QLineEdit(backend_url)
+        self.backend_url_edit.setObjectName("backendUrl")
+        self.backend_url_edit.setPlaceholderText(DEFAULT_BACKEND_URL)
+        self.backend_url_edit.setToolTip(
+            "Where the etcode desktop app in the VM finds the backend. "
+            "The host is 10.0.2.2 as seen from the VM."
+        )
+        form.addRow("Backend URL:", self.backend_url_edit)
+
+        self.token_edit = QLineEdit(backend_token)
+        self.token_edit.setObjectName("backendToken")
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("none: the app asks for it")
+        self.token_edit.setToolTip(
+            "The access token for the backend. It is stored in this VM's vm.json and seed.iso (both private to "
+            "you) and written to /etc/etcode/desktop.json in the VM, where the model can read it. "
+            "Use a token that is only for etcode VMs."
+        )
+        form.addRow("Backend token:", self.token_edit)
+
+        self.show_token = QCheckBox("Show the token")
+        self.show_token.setObjectName("showToken")
+        self.show_token.toggled.connect(
+            lambda shown: self.token_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password
+            )
+        )
+        form.addRow("", self.show_token)
+
+        self.error_label = QLabel()
+        self.error_label.setObjectName("backendError")
+        self.error_label.setStyleSheet("color: #b00020;")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        form.addRow(self.error_label)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -53,12 +97,29 @@ class NewVMDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def accept(self) -> None:
+        """Close only if the backend settings are valid; otherwise say what is wrong and stay open."""
+        try:
+            self.backend_values()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            self.error_label.show()
+            return
+        super().accept()
+
     def values(self) -> tuple[str, int, int, int]:
         return (
             self.name_edit.text(),
             self.cpus.value(),
             self.memory.value(),
             self.disk.value(),
+        )
+
+    def backend_values(self) -> tuple[str, str]:
+        """``(backend_url, backend_token)``, cleaned. Raises ``ValueError`` (with a message for the user)."""
+        return (
+            normalize_backend_url(self.backend_url_edit.text()),
+            normalize_backend_token(self.token_edit.text()),
         )
 
 
@@ -174,6 +235,8 @@ class MainWindow(QMainWindow):
             f"<b>{vm.name}</b> — {vm.status} — {vm.cpus} vCPU, "
             f"{vm.memory_mb} MB RAM, {vm.disk_gb} GB disk"
             + (f" — VNC port {vm.vnc_port}" if vm.status == "running" else "")
+            + (f"<br>Backend: {html.escape(vm.backend_url)}"
+               f" ({'token set' if vm.backend_token else 'no token'})" if vm.backend_url else "")
         )
         running = vm.status == "running"
         self.act_start.setEnabled(not running)
@@ -198,13 +261,19 @@ class MainWindow(QMainWindow):
         self.update_info()
 
     def on_new(self) -> None:
-        dialog = NewVMDialog(self)
+        dialog = NewVMDialog(
+            self, backend_url=self.settings.backend_url, backend_token=self.settings.backend_token
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, cpus, memory, disk = dialog.values()
+        backend_url, backend_token = dialog.backend_values()
         try:
             self.statusBar().showMessage("Creating VM…")
-            vm = self.manager.create(name, cpus=cpus, memory_mb=memory, disk_gb=disk)
+            vm = self.manager.create(
+                name, cpus=cpus, memory_mb=memory, disk_gb=disk,
+                backend_url=backend_url, backend_token=backend_token,
+            )
         except VMError as exc:
             QMessageBox.warning(self, "Cannot create VM", str(exc))
             self.statusBar().showMessage("Ready")

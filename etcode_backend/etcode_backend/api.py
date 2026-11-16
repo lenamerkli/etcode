@@ -16,9 +16,26 @@ from .db import connect, initialize, loads
 from .errors import APIError
 from .media import image_path, image_record, save_image
 from .schemas import ModelChange, SessionCreate, SubmitBatch
-from .sessions import cancel, change_model, create_session, owned_session, session_metadata, submit
+from .sessions import cancel, change_model, create_session, list_sessions, owned_session, session_metadata, submit
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 500
+MAX_OFFSET = 1_000_000
+
+
+def _page_parameter(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = minimum - 1
+    if not minimum <= value <= maximum:
+        raise APIError("invalid_number", f"{name} must be an integer between {minimum} and {maximum}")
+    return value
 
 
 def _ts(value: float) -> str:
@@ -89,6 +106,13 @@ def create_app(settings: Settings | None = None) -> Flask:
     def models():
         from .providers import get_provider
         return jsonify([dict(model.to_dict(), available=get_provider(model.provider, settings).configured()) for model in MODELS])
+
+    @app.get("/sessions")
+    def sessions():
+        limit = _page_parameter("limit", DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE)
+        offset = _page_parameter("offset", 0, 0, MAX_OFFSET)
+        items, total = list_sessions(g.db, g.owner, limit, offset)
+        return jsonify({"sessions": [_metadata(item) for item in items], "total": total})
 
     @app.post("/session")
     def new_session():

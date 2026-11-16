@@ -14,6 +14,9 @@ guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
 * **View the screen** — a pure-Python RFB (VNC) client renders QEMU's
   built-in VNC display inside the app. The virtual display advertises
   **1920×1080** as its preferred resolution by default.
+* **etcode desktop app in the VM** — the image contains the etcode desktop app (the
+  GUI for the etcode backend), and it starts by itself when the VM's session starts. Each
+  new VM gets the backend URL and access token through its cloud-init seed (see below).
 * **Mouse and keyboard input** — clicks, wheel and keys are forwarded to
   the guest (X11 keysym translation included).
 
@@ -37,20 +40,60 @@ python -m etcode_manager
 {
   "base_image": "/path/to/etcode-base-v1-amd64.qcow2",
   "vms_dir": "/path/to/vms",
-  "ssh_public_key": "ssh-ed25519 AAAA... you@host"
+  "ssh_public_key": "ssh-ed25519 AAAA... you@host",
+  "backend_url": "http://10.0.2.2:8765",
+  "backend_token": "the access token for etcode_backend"
 }
 ```
 
 `ssh_public_key` is baked into each new VM's cloud-init `user-data` so you
-can SSH into the `agent` user. The VMs are stored as:
+can SSH into the `agent` user. `backend_url` and `backend_token` are the defaults for the
+etcode backend that the desktop app in a VM talks to (see "The etcode desktop app in the VM").
+The VMs are stored as:
 
 ```
 vms/<instance-id>/
     disk.qcow2   writable overlay (backed by the template)
-    seed.iso     cloud-init NoCloud seed (retains its instance-id)
-    vm.json      name, resources, ports
+    seed.iso     cloud-init NoCloud seed (retains its instance-id), mode 0600
+    vm.json      name, resources, ports, backend URL and token, mode 0600
     qemu.log     QEMU console output
 ```
+
+## The etcode desktop app in the VM
+
+The image has the etcode desktop app (`../etcode_desktop`) in `/opt/etcode/etcode_desktop`, with its
+dependencies (PySide6, requests) in `/opt/etcode/.venv`. `/usr/local/bin/etcode-desktop` starts it, it has an
+entry in the application menu and a quick-launch button on the panel (so it can be opened again after it was
+closed), and `/etc/xdg/autostart/etcode-desktop.desktop` starts it maximized when the session starts, two
+seconds after the panel. The manager does not launch it.
+
+**Backend URL and token.** The *New VM* dialog has the fields *Backend URL* and *Backend token*, prefilled from
+`backend_url` and `backend_token` in `config.json` (default URL `http://10.0.2.2:8765`: the host, as seen from
+a VM behind QEMU's user-mode network; a server is just another URL). Change them per VM to give one VM its own
+token. An empty URL means the default, an empty token means that the app asks for one when it starts.
+The values are stored in the VM's `vm.json` (the seed needs them whenever it is regenerated), and `seed.py`
+delivers them with a cloud-init `write_files` entry to `/etc/etcode/desktop.json` in the VM (owner `agent`,
+mode 0600). The app reads that file as its "provisioned" layer.
+
+* **Changes do not reach a VM that has booted.** cloud-init writes the file once per instance id, and the
+  manager keeps the instance id stable. To change the token of an existing VM, use the connection dialog of
+  the desktop app (the gear in its status bar). A value set there wins over the provisioned one.
+* **The token is a secret.** It is in `vm.json` and `seed.iso` on your disk (both mode 0600), and in the VM
+  in `/etc/etcode/desktop.json`. **The model can read it**: it runs commands as `agent`, who can also use
+  `sudo`. A backend token only reaches the sessions of its own owner, so use a token that is only for etcode VMs
+  (one per VM when sessions must be kept apart). Never put a token into the template image: the build scripts
+  contain none, and a test checks that.
+* **Use HTTPS** for a backend that is not on your own machine or network. The desktop app warns about `http://`
+  to a public address.
+* The first boot can reach the desktop before cloud-init has written the file. The autostart entry therefore
+  runs `etcode-desktop --wait-for-provisioning`, which waits (at most 60 s) until the file exists or cloud-init
+  has finished.
+
+**Rebuilding the image.** The desktop app is part of the template, so an existing template does not have it:
+build a new one (`IMAGE_VERSION=v5 ./build_image.sh`, because templates are versioned and never modified), then
+point `base_image` at it. VMs that were made from an older template keep that template. `build_image.sh` takes
+the app from `../etcode_desktop` (or `DESKTOP_DIR`), and `provision.sh` installs its dependencies and checks,
+with `ldd` and an offscreen start, that Qt can load. A build fails loudly if a system library is missing.
 
 ## Tests
 
@@ -58,7 +101,9 @@ vms/<instance-id>/
 python -m unittest discover -s tests
 ```
 
-`tests/test_rfb.py` validates the RFB client against a fake VNC server;
+`tests/test_desktop_provisioning.py` covers the backend settings, the `write_files` section of the seed (valid YAML for
+any token, and the JSON is what the desktop app reads), the private files, the dialog, and that the image scripts,
+packaging files and panel layout fit together. `tests/test_rfb.py` validates the RFB client against a fake VNC server;
 `tests/test_vm_lifecycle.py` runs create → start → QMP → VNC → stop →
 delete against real QEMU (skipped if QEMU is not installed).
 

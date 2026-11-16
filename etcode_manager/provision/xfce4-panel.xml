@@ -3,10 +3,10 @@
 <!-- Xfce panel layout for etcode VMs (SETTINGS.md).
      Extracted from a configured reference VM, taskbar left to right:
        1. app selector   - Whisker Menu (appfinder button icon)
-       2. quick launch   - Firefox, Thunar, Terminal, VSCodium (one launcher
+       2. quick launch   - Firefox, Thunar, Terminal, VSCodium, etcode (one launcher
                           plugin per app; launcher-*/ hold the item .desktop
                           files the launcher plugin uses)
-       -- expanding separator: pushes everything below to the right edge --
+       (expanding separator: pushes everything below to the right edge)
        3. window buttons - open windows (like the Windows taskbar)
        4. tray icons     - Notification Area
        5. calendar       - Clock (click opens the calendar)
@@ -30,6 +30,7 @@
         <value type="int" value="3"/>
         <value type="int" value="4"/>
         <value type="int" value="5"/>
+        <value type="int" value="11"/>
         <value type="int" value="10"/>
         <value type="int" value="6"/>
         <value type="int" value="7"/>
@@ -64,6 +65,12 @@
     <property name="plugin-5" type="string" value="launcher">
       <property name="items" type="array">
         <value type="string" value="17929499124.desktop"/>
+      </property>
+    </property>
+    <!-- the etcode desktop app (launcher-11/ is staged by build_image.sh from etcode_desktop/packaging) -->
+    <property name="plugin-11" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="17929499125.desktop"/>
       </property>
     </property>
     <!-- expanding separator: right-aligns window buttons, tray, clock, user -->
