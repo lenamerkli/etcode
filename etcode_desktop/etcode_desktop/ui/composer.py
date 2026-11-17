@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QMimeData, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QKeyEvent
+from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from .image_loader import pixmap_from_bytes
 
 MIN_LINES = 2
 MAX_LINES = 8
+MAX_USER_HEIGHT = 800  # pixels: the most the user can drag the box to
 CHIP_THUMBNAIL = QSize(40, 40)
 PROBLEM_SECONDS = 6
 IMAGE_FILTER = "Pictures (*.png *.jpg *.jpeg *.webp *.gif);;All files (*)"
@@ -48,6 +49,7 @@ class _Edit(QPlainTextEdit):
         super().__init__()
         self.setTabChangesFocus(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._user_height: int | None = None  # set by dragging the handle above the box
         self.document().documentLayout().documentSizeChanged.connect(self._fit)
         self._fit()
 
@@ -79,14 +81,69 @@ class _Edit(QPlainTextEdit):
             return
         super().insertFromMimeData(source)
 
-    def _fit(self) -> None:
-        line = self.fontMetrics().lineSpacing()
-        lines = min(max(int(self.document().size().height()), MIN_LINES), MAX_LINES)
+    def _lines_height(self, lines: int) -> int:
         margins = int(self.document().documentMargin() * 2) + 2 * self.frameWidth() + 2
-        self.setFixedHeight(lines * line + margins)
+        return lines * self.fontMetrics().lineSpacing() + margins
+
+    def _fit(self) -> None:
+        lines = min(max(int(self.document().size().height()), MIN_LINES), MAX_LINES)
+        height = self._lines_height(lines)
+        if self._user_height is not None:
+            height = max(height, self._user_height)
+        self.setFixedHeight(height)
+
+    def set_user_height(self, height: int | None) -> None:
+        """The height chosen by the user (None: grow with the text again). The box still grows for longer text."""
+        if height is not None:
+            height = min(max(height, self._lines_height(MIN_LINES)), MAX_USER_HEIGHT)
+        self._user_height = height
+        self._fit()
+
+    @property
+    def user_height(self) -> int | None:
+        return self._user_height
 
     def sizeHint(self) -> QSize:
         return QSize(200, self.height())
+
+
+class _ResizeHandle(QFrame):
+    """A thin bar above the text box: drag it up or down to make the box taller or shorter. Double-click resets."""
+
+    def __init__(self, edit: _Edit):
+        super().__init__()
+        self._edit = edit
+        self._start_y: float | None = None
+        self._start_height = 0
+        self.setObjectName("composerResizeHandle")
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setFixedHeight(6)
+        self.setToolTip("Drag to resize the message box (double-click to reset)")
+        self.setStyleSheet("#composerResizeHandle { border-top: 1px solid palette(mid); margin: 0 40%; }")
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_y = event.globalPosition().y()
+            self._start_height = self._edit.height()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._start_y is not None:
+            # dragging up (smaller y) makes the box taller
+            self._edit.set_user_height(int(self._start_height + self._start_y - event.globalPosition().y()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._start_y = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        self._edit.set_user_height(None)
+        event.accept()
 
 
 class _Chip(QFrame):
@@ -171,6 +228,8 @@ class Composer(QWidget):
         layout.setContentsMargins(8, 4, 8, 8)
         layout.addWidget(self._problem)
         layout.addWidget(self._strip)
+        self._resize_handle = _ResizeHandle(self._edit)
+        layout.addWidget(self._resize_handle)
         layout.addWidget(self._edit)
         layout.addLayout(buttons)
 
@@ -286,6 +345,10 @@ class Composer(QWidget):
     @property
     def edit(self) -> QPlainTextEdit:
         return self._edit
+
+    @property
+    def resize_handle(self) -> QFrame:
+        return self._resize_handle
 
     @property
     def send_button(self) -> QPushButton:

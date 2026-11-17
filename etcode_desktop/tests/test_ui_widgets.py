@@ -489,6 +489,20 @@ def test_the_edit_grows_with_its_text_up_to_a_limit(qapp, composer):
     assert big <= MAX_LINES * line + 30
 
 
+def test_the_edit_can_be_resized_by_the_user(qapp, composer):
+    edit = composer.edit
+    auto = edit.height()
+    edit.set_user_height(auto + 200)
+    assert edit.height() == auto + 200
+    edit.set_user_height(1)  # never smaller than the minimum
+    assert edit.height() == auto
+    edit.set_user_height(10_000)  # never absurdly tall
+    assert edit.height() < 10_000
+    edit.set_user_height(None)
+    assert edit.height() == auto and edit.user_height is None
+    assert composer.resize_handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
+
+
 def test_composer_is_a_plain_widget(qapp):
     assert isinstance(Composer(), QWidget)
 
