@@ -11,13 +11,13 @@ changes are marshalled to the GUI thread through queued signals.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtCore import QRect
+from PySide6.QtCore import Qt, Signal, QSize, QPointF
 from PySide6.QtGui import QImage, QPainter, QColor, QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from .keysyms import key_event_to_keysym
 from .rfb import RFBClient, RFBError
+from .scaling import ScalingFilter, fitted_rect, resample_frame
 
 
 class VncView(QWidget):
@@ -36,8 +36,9 @@ class VncView(QWidget):
         self._button_mask = 0
         self._pointer = (0, 0)     # last known framebuffer coords
         self._status = "Not connected"
-        self._scale = 1.0
-        self._offset = (0, 0)
+        self._scaling_filter = ScalingFilter.AREA
+        self._scaled_image: QImage | None = None
+        self._scaled_key: tuple | None = None
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)  # Forward pointer motion even without a pressed button.
@@ -69,6 +70,7 @@ class VncView(QWidget):
         if client is not None:
             client.close()
         self._image = None
+        self._invalidate_scaled_image()
         self._button_mask = 0
         self._status = "Not connected"
         self.update()
@@ -87,9 +89,42 @@ class VncView(QWidget):
         self.disconnected.emit(reason)
 
     def _set_image(self, image: QImage) -> None:
-        self._image = image
+        self._image = image if not image.isNull() else None
+        self._invalidate_scaled_image()
         self._status = f"{image.width()}×{image.height()}"
         self.update()
+
+    # -- scaling ------------------------------------------------------------
+
+    @property
+    def scaling_filter(self) -> ScalingFilter:
+        return self._scaling_filter
+
+    def set_scaling_filter(self, filter: ScalingFilter | str) -> None:
+        filter = ScalingFilter(filter)
+        if filter != self._scaling_filter:
+            self._scaling_filter = filter
+            self._invalidate_scaled_image()
+            self.update()
+
+    def _invalidate_scaled_image(self) -> None:
+        self._scaled_image = None
+        self._scaled_key = None
+
+    def _display_image(self, size: QSize, dpr: float) -> QImage:
+        """Cache one resampled frame, not a resize on every expose/repaint.
+
+        Include DPR as well as physical size: a move between monitors can
+        change image metadata even when the required pixel dimensions match.
+        """
+        image = self._image
+        assert image is not None
+        key = (image.cacheKey(), size.width(), size.height(), dpr, self._scaling_filter)
+        if self._scaled_image is None or key != self._scaled_key:
+            self._scaled_image = resample_frame(image, size, self._scaling_filter)
+            self._scaled_image.setDevicePixelRatio(dpr)
+            self._scaled_key = key
+        return self._scaled_image
 
     # -- painting -----------------------------------------------------------
 
@@ -101,20 +136,30 @@ class VncView(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._status)
             return
 
-        image = self._image
-        scale = min(self.width() / image.width(), self.height() / image.height())
-        w, h = int(image.width() * scale), int(image.height() * scale)
-        x = (self.width() - w) // 2
-        y = (self.height() - h) // 2
-        self._scale, self._offset = scale, (x, y)
-        painter.drawImage(QRect(x, y, w, h), image)
+        dpr = self.devicePixelRatioF()
+        rect = fitted_rect(self._image.size(), self.size(), dpr)
+        if rect.isEmpty():
+            return
+        image = self._display_image(rect.size(), dpr)
+        # The cached image already has its final physical dimensions.  Drawing
+        # at a device-aligned point with matching DPR is a 1:1 pixel copy, not
+        # a second bilinear resize to a floating-point target rectangle.
+        painter.drawImage(QPointF(rect.x() / dpr, rect.y() / dpr), image)
 
     def _to_screen(self, pos) -> tuple[int, int]:
-        """Map a widget position to framebuffer coordinates."""
-        if self._image is None or self._scale <= 0:
+        """Map through the exact, device-rounded rectangle used for painting.
+
+        Calculate it here too, so input arriving just after a resize (before
+        the next paint) never uses stale offsets or scale factors.
+        """
+        if self._image is None:
             return 0, 0
-        x = int((pos.x() - self._offset[0]) / self._scale)
-        y = int((pos.y() - self._offset[1]) / self._scale)
+        dpr = self.devicePixelRatioF()
+        rect = fitted_rect(self._image.size(), self.size(), dpr)
+        if rect.isEmpty():
+            return 0, 0
+        x = int((pos.x() * dpr - rect.x()) * self._image.width() / rect.width())
+        y = int((pos.y() * dpr - rect.y()) * self._image.height() / rect.height())
         return (
             max(0, min(x, self._image.width() - 1)),
             max(0, min(y, self._image.height() - 1)),

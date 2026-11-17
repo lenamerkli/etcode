@@ -46,7 +46,7 @@ resize_rootfs: true
 DESKTOP_CONFIG_PATH = "/etc/etcode/desktop.json"
 
 
-def render_desktop_json(backend_url: str = "", backend_token: str = "") -> str:
+def render_desktop_json(backend_url: str = "", backend_token: str = "", vm_id: str = "") -> str:
     """The content of ``/etc/etcode/desktop.json``: one line of JSON with the keys the desktop app reads.
 
     Keys without a value are left out, so that the app falls back to its next layer for them.
@@ -56,20 +56,22 @@ def render_desktop_json(backend_url: str = "", backend_token: str = "") -> str:
         values["backend_url"] = backend_url.strip()
     if backend_token.strip():
         values["token"] = backend_token.strip()
+    if vm_id.strip():
+        values["vm_id"] = vm_id.strip()
     if not values:
         return ""
     # ensure_ascii and a single line: nothing in a value can break out of the YAML block it is put in.
     return json.dumps(values, ensure_ascii=True)
 
 
-def render_write_files(backend_url: str = "", backend_token: str = "") -> str:
+def render_write_files(backend_url: str = "", backend_token: str = "", vm_id: str = "") -> str:
     """The cloud-config ``write_files`` section that delivers the desktop settings, or "" if there are none.
 
     * ``defer: true`` writes the file late in boot, when the user ``agent`` certainly exists.
     * The file belongs to ``agent`` (mode 0600), so the app can read it. The app never writes into ``/etc/etcode``.
     * The JSON is one line, so indenting it into the block scalar cannot change it.
     """
-    content = render_desktop_json(backend_url, backend_token)
+    content = render_desktop_json(backend_url, backend_token, vm_id)
     if not content:
         return ""
     return (
@@ -87,6 +89,7 @@ def render_user_data(
     ssh_authorized_keys: tuple[str, ...] = (),
     backend_url: str = "",
     backend_token: str = "",
+    vm_id: str = "",
 ) -> str:
     """Render the ``user-data`` cloud-config for one VM.
 
@@ -97,7 +100,7 @@ def render_user_data(
     ssh_block = ""
     if keys:
         ssh_block = "    ssh_authorized_keys:\n" + "".join(f"      - {json.dumps(key)}\n" for key in keys)
-    write_files = render_write_files(backend_url, backend_token)
+    write_files = render_write_files(backend_url, backend_token, vm_id)
     return USER_DATA_HEAD + ssh_block + USER_DATA_TAIL + ("\n" + write_files if write_files else "")
 
 
@@ -116,7 +119,7 @@ def write_seed_iso(
 ) -> Path:
     """Create a NoCloud ``CIDATA`` seed ISO at *path* (mode 0600) and return it."""
     files = {
-        "user-data": render_user_data(ssh_authorized_keys, backend_url, backend_token).encode("utf-8"),
+        "user-data": render_user_data(ssh_authorized_keys, backend_url, backend_token, instance_id).encode("utf-8"),
         "meta-data": render_meta_data(instance_id, hostname).encode("utf-8"),
     }
 

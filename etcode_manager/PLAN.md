@@ -169,8 +169,9 @@ manager only prepares the VM for it; it never starts it.
   library or if the app cannot be imported. The launcher (`/usr/local/bin/etcode-desktop`), menu entry and icon
   come from `etcode_desktop/packaging/`. The autostart entry goes to `/etc/xdg/autostart/` (like
   `etcode-no-blank.desktop`), and a quick-launch button is plugin 11 of the panel layout.
-* **Per VM** (`seed.py`): the backend URL and token of the VM (kept in its `vm.json`) become a cloud-init
-  `write_files` entry for `/etc/etcode/desktop.json`, owner `agent`, mode 0600, `defer: true`. No token is ever in
+* **Per VM** (`seed.py`): the VM UUID plus its backend URL and token (kept in its `vm.json`) become a cloud-init
+  `write_files` entry for `/etc/etcode/desktop.json`, owner `agent`, mode 0600, `defer: true`. The UUID scopes the
+  desktop's local chat list independently of the token. No token is ever in
   the template. cloud-init writes the file once per instance id, so a changed token reaches a VM that has booted
   only through the app's own connection dialog.
 * **Race on first boot**: `defer: true` writes the file in cloud-init's last stage, and the autostart can be

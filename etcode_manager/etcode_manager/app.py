@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QMessageBox, QSplitter,
     QStatusBar, QSpinBox, QDialog, QDialogButtonBox, QFormLayout,
-    QLineEdit, QCheckBox,
+    QLineEdit, QCheckBox, QComboBox,
 )
 
 from .config import (
@@ -18,6 +18,7 @@ from .config import (
 )
 from .vm import VM, VMManager, VMError
 from .view import VncView
+from .scaling import ScalingFilter
 
 
 class NewVMDialog(QDialog):
@@ -131,7 +132,7 @@ class MainWindow(QMainWindow):
         self._current: VM | None = None
 
         self.setWindowTitle("etcode-manager")
-        self.resize(1100, 700)
+        self.resize(self._initial_window_size())
 
         # ---- actions
         self.act_new = QAction("New VM…", self)
@@ -178,6 +179,22 @@ class MainWindow(QMainWindow):
         conn_row.addWidget(self.btn_connect)
         conn_row.addWidget(self.btn_disconnect)
         conn_row.addStretch(1)
+
+        scaling_label = QLabel("Scaling:")
+        self.scaling_combo = QComboBox()
+        self.scaling_combo.setObjectName("screenScaling")
+        self.scaling_combo.addItem("Smooth (area)", ScalingFilter.AREA)
+        self.scaling_combo.addItem("Sharper (Lanczos)", ScalingFilter.LANCZOS)
+        self.scaling_combo.setToolTip(
+            "Smooth: area-averaged downscaling, fast and stable for small text.\n"
+            "Sharper: antialiased Lanczos-3, crisper edges but more CPU use and possible faint halos."
+        )
+        scaling_label.setBuddy(self.scaling_combo)
+        self.scaling_combo.currentIndexChanged.connect(
+            lambda _: self.screen.set_scaling_filter(self.scaling_combo.currentData())
+        )
+        conn_row.addWidget(scaling_label)
+        conn_row.addWidget(self.scaling_combo)
         layout.addLayout(conn_row)
 
         splitter.addWidget(right)
@@ -194,6 +211,28 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
         self._timer.start(3000)
+
+    @staticmethod
+    def _initial_window_size() -> QSize:
+        """Open with enough room to show the 1920x1080 guest near its real size.
+
+        The remote screen is fitted into the pane, so a small default window
+        scales it down to roughly 40% and normal UI text becomes unreadable
+        even with smooth scaling.  Prefer a window that fits the guest 1:1,
+        but never open larger than the available screen.
+        """
+        fallback = QSize(1100, 700)
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return fallback
+        available = screen.availableGeometry()
+        if available.width() <= 0 or available.height() <= 0:
+            return fallback
+        # VM list (280) + guest width (1920) + splitter/margins; the window
+        # chrome (toolbar, info line, buttons, status bar) needs ~150 px.
+        width = min(available.width(), max(fallback.width(), 280 + 1920 + 40))
+        height = min(available.height(), max(fallback.height(), 1080 + 150))
+        return QSize(width, height)
 
     # -- data ---------------------------------------------------------------
 

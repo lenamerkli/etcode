@@ -22,7 +22,7 @@ guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
 
 ## Requirements
 
-* Python 3.10+ (`pip install -r requirements.txt` → PySide6, pycdlib)
+* Python 3.10+ (`pip install -r requirements.txt` → PySide6, pycdlib, Pillow)
 * QEMU: `apt-get install qemu-system-x86 qemu-utils` (Debian),
   `dnf install qemu-kvm` (Fedora), [qemu.weilnetz.de](https://qemu.weilnetz.de/w64/) (Windows)
 * The base image: run `./build_image.sh` (see `PLAN.md`), or point
@@ -33,6 +33,31 @@ guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
 ```bash
 python -m etcode_manager
 ```
+
+## Screen scaling and text quality
+
+The **Scaling** selector next to the screen connection buttons switches between:
+
+* **Smooth (area)** — the default. Uses Qt's area-averaged reduction to avoid dropping thin
+  glyph strokes when the 1920×1080 desktop is fitted into a much smaller pane. Enlargement
+  uses Qt's smooth interpolation.
+* **Sharper (Lanczos)** — uses Pillow's antialiased Lanczos-3 filter for crisper text and
+  edges. It costs more CPU per changing frame and can introduce faint halos; choose Smooth
+  if you prefer softer edges or are viewing fast-moving content. The selection lasts for
+  the current manager window and does not change the guest's resolution.
+
+Both modes resize the **original framebuffer directly to the physical output pixel size**,
+including fractional display scaling (125%, 150%, etc.). The result and letterbox position
+are device-pixel aligned, then painted without a second resize. An unchanged frame is cached
+across repaints; a new frame, target size, display pixel ratio or filter rebuilds that cache.
+At native pixel size neither filter modifies the image. Mouse coordinates follow the same
+rounded display rectangle.
+
+After upgrading, run `pip install -r requirements.txt` to install Pillow for the Sharper mode.
+The default area filter itself uses only Qt. These are **host-side viewer changes**: no VM image
+rebuild or extra guest software is needed. Neither filter can recover detail once text becomes
+only a few pixels high; enlarging the window or lowering the resolution in the guest's Display
+settings can still help on small screens.
 
 ## Configuration (`config.json`, optional)
 
@@ -103,7 +128,11 @@ python -m unittest discover -s tests
 
 `tests/test_desktop_provisioning.py` covers the backend settings, the `write_files` section of the seed (valid YAML for
 any token, and the JSON is what the desktop app reads), the private files, the dialog, and that the image scripts,
-packaging files and panel layout fit together. `tests/test_rfb.py` validates the RFB client against a fake VNC server;
+packaging files and panel layout fit together. `tests/test_scaling.py` covers area/Lanczos filtering, aliasing,
+cache invalidation and input mapping. It also checks actual offscreen painting in subprocesses at 100%, 125%, 150%
+and 200% display scaling: the displayed pixels must exactly match a single resampling of the original frame.
+`tests/test_gui_smoke.py` checks the scaling selector and other screen controls.
+`tests/test_rfb.py` validates the RFB client against a fake VNC server;
 `tests/test_vm_lifecycle.py` runs create → start → QMP → VNC → stop →
 delete against real QEMU (skipped if QEMU is not installed).
 

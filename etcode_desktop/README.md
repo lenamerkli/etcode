@@ -159,26 +159,32 @@ Each key is resolved separately, highest priority first:
 | 3 | `/etc/etcode/desktop.json` | provisioned by the manager, read only (`ETCODE_PROVISIONED_FILE` overrides the path) |
 | 4 | defaults | `http://10.0.2.2:8765` (the host, seen from a QEMU VM), no token |
 
-Keys: `backend_url`, `token`, `max_parallel_tools` (1-64, default 8). An invalid value
-is logged and skipped, and the next layer is used.
+Keys: `backend_url`, `token`, `max_parallel_tools` (1-64, default 8), and `vm_id` (stable UUID).
+The manager provisions `vm_id` from the VM UUID. Outside a managed VM, the app creates and persists
+one in its user config. Token rotation does not change this local identity.
+
+An invalid value is logged and skipped, and the next layer is used.
 
 The token can be read by anything running as the same user, including the model's
 `bash` tool. Use a token that is dedicated to etcode VMs.
 
 ## Sessions
 
-The backend ties sessions to the access token, and it can list them (`GET /sessions`) but not
-delete them. The app keeps its own list in `store.sqlite3` (mode 0600), keyed by backend URL and
-a fingerprint of the token (the token itself is never stored). So switching the token or the URL
-shows that token's sessions, and the others are kept but hidden.
+The backend still supports `GET /sessions`, but the desktop does not call it automatically.
+The app keeps its own list in `store.sqlite3` (mode 0600), keyed by backend URL and stable VM ID,
+not by bearer token. A VM therefore shows only chats it created or explicitly added by ID; a token
+rotation does not switch chat lists. The backend remains the authority for whether the caller's
+token may access a session.
 
-* The sidebar shows the stored sessions at once, also when the backend is unreachable. It is
-  refreshed from the backend at startup and every 30 seconds.
-* A session that the backend lists but the store doesn't know is imported. This also recovers
-  everything after the store file was lost or damaged. A damaged file is set aside as
-  `store.sqlite3.corrupt-<time>`.
-* A stored session that the backend no longer lists is asked about, and shown greyed out as "not
-  on the backend" only when the backend answers 404. A connection error never marks anything.
+* New session IDs are saved locally before the create flow returns. The sidebar uses this local
+  list immediately, including when the backend is unreachable.
+* At startup and every 30 seconds, the app refreshes metadata only for locally known session IDs
+  with `GET /session/<id>`. It never discovers/imports chats through `GET /sessions`.
+* A locally stored session that the backend answers 404 for is shown greyed out as "not on the
+  backend". Connection errors never mark anything missing.
+* To add a chat explicitly, use "Add a session by its id…" (the **⋯** button). The backend still
+  enforces token ownership, so the adding VM's credential must already have access to that session.
+  `GET /sessions` remains available to other API clients or for future manual recovery.
 * "Remove from list" hides a session locally (the backend can't delete it). "Show removed sessions"
   brings it back. A title you typed is kept, and the backend's title is used otherwise.
 * On a backend without `GET /sessions` the app refreshes the most recent stored sessions one by
@@ -203,7 +209,7 @@ etcode_desktop/
     sse.py                                SSE parser and EventFollower (reconnects with Last-Event-ID)
     models.py, errors.py                  typed views of the JSON, exceptions
     store.py                              SessionStore: the local list of sessions (SQLite)
-    sync.py                               SessionSync: merges the backend's list into the store, creates sessions
+    sync.py                               SessionSync: refreshes locally known IDs, creates and explicitly attaches sessions
     controller.py                         SessionController: history, send, follow the stream, stop. Emits events
     options.py, attachments.py            the inference options of a session, pictures to attach
     tools/                                the tools the model can use: bash, files, images, the scheduler

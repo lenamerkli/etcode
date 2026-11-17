@@ -19,6 +19,7 @@ import logging
 import os
 import stat
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,9 +37,11 @@ MAX_PARALLEL_TOOLS_LIMIT = 64
 KEY_URL = "backend_url"
 KEY_TOKEN = "token"
 KEY_PARALLEL = "max_parallel_tools"
+KEY_VM_ID = "vm_id"
 
 ENV_URL = "ETCODE_BACKEND_URL"
 ENV_TOKEN = "ETCODE_API_TOKEN"
+ENV_VM_ID = "ETCODE_VM_ID"
 
 SOURCE_ENV = "env"
 SOURCE_GUI = "gui"
@@ -82,6 +85,17 @@ def normalize_token(value: Any) -> str | None:
     return value
 
 
+def normalize_vm_id(value: Any) -> str:
+    """Validate a stable local VM/device identity (UUID supplied by the manager)."""
+    if not isinstance(value, str):
+        raise ValueError("vm_id must be a string")
+    value = value.strip()
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("vm_id must be a UUID") from exc
+
+
 def normalize_parallel(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("max_parallel_tools must be an integer")
@@ -95,17 +109,19 @@ _NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     KEY_URL: normalize_url,
     KEY_TOKEN: normalize_token,
     KEY_PARALLEL: normalize_parallel,
+    KEY_VM_ID: normalize_vm_id,
 }
 _DEFAULTS: dict[str, Any] = {
     KEY_URL: DEFAULT_BACKEND_URL,
     KEY_TOKEN: None,
     KEY_PARALLEL: DEFAULT_MAX_PARALLEL_TOOLS,
+    KEY_VM_ID: None,
 }
-_ENV_KEYS = {ENV_URL: KEY_URL, ENV_TOKEN: KEY_TOKEN}
+_ENV_KEYS = {ENV_URL: KEY_URL, ENV_TOKEN: KEY_TOKEN, ENV_VM_ID: KEY_VM_ID}
 
 
 def token_fingerprint(token: str) -> str:
-    """Stable, non-reversible id of a token. The session store keys sessions by it."""
+    """Stable, non-reversible token identifier for legacy local-store scopes."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
@@ -116,6 +132,7 @@ class Settings:
     backend_url: str
     token: str = field(default="", repr=False)  # "" means: no token configured
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
+    vm_id: str = ""
     # key -> where the value came from (SOURCE_*). For display only.
     sources: Mapping[str, str] = field(default_factory=dict, compare=False, hash=False)
 
@@ -227,10 +244,13 @@ class ConfigStore:
 
     def load(self) -> Settings:
         env_raw = {key: self._environ[var] for var, key in _ENV_KEYS.items() if var in self._environ}
+        env_layer = _clean_layer(env_raw, "the environment")
+        gui_layer = _clean_layer(_read_json_object(self.paths.user_config_file), str(self.paths.user_config_file))
+        provisioned_layer = _clean_layer(_read_json_object(self.paths.provisioned_file), str(self.paths.provisioned_file))
         layers = (
-            (SOURCE_ENV, _clean_layer(env_raw, "the environment")),
-            (SOURCE_GUI, _clean_layer(_read_json_object(self.paths.user_config_file), str(self.paths.user_config_file))),
-            (SOURCE_PROVISIONED, _clean_layer(_read_json_object(self.paths.provisioned_file), str(self.paths.provisioned_file))),
+            (SOURCE_ENV, env_layer),
+            (SOURCE_GUI, gui_layer),
+            (SOURCE_PROVISIONED, provisioned_layer),
         )
         values: dict[str, Any] = {}
         sources: dict[str, str] = {}
@@ -241,10 +261,26 @@ class ConfigStore:
                     break
             else:
                 values[key], sources[key] = default, SOURCE_DEFAULT
+        # VM identity is independent of the bearer token. Prefer the manager's immutable
+        # per-VM UUID, otherwise keep a generated UUID in the user's config across restarts.
+        if KEY_VM_ID in env_layer:
+            vm_id, vm_source = env_layer[KEY_VM_ID], SOURCE_ENV
+        elif KEY_VM_ID in provisioned_layer:
+            vm_id, vm_source = provisioned_layer[KEY_VM_ID], SOURCE_PROVISIONED
+        elif KEY_VM_ID in gui_layer:
+            vm_id, vm_source = gui_layer[KEY_VM_ID], SOURCE_GUI
+        else:
+            vm_id, vm_source = str(uuid.uuid4()), SOURCE_GUI
+            try:
+                self.save_overrides({KEY_VM_ID: vm_id})
+            except OSError as exc:
+                log.warning("could not persist local VM identity: %s", exc)
+        values[KEY_VM_ID], sources[KEY_VM_ID] = vm_id, vm_source
         return Settings(
             backend_url=values[KEY_URL],
             token=values[KEY_TOKEN] or "",
             max_parallel_tools=values[KEY_PARALLEL],
+            vm_id=vm_id,
             sources=sources,
         )
 

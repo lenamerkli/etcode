@@ -106,13 +106,29 @@ def test_invalid_token_is_not_logged(paths, caplog):
 
 # --- saving ---------------------------------------------------------------------------
 
+def test_vm_identity_is_stable_and_independent_of_token(paths):
+    first = store(paths).load()
+    assert first.vm_id
+    store(paths).save_overrides({KEY_TOKEN: "rotated-token"})
+    second = store(paths).load()
+    assert second.vm_id == first.vm_id
+
+
+def test_manager_vm_identity_overrides_a_local_fallback(paths):
+    vm_id = "12345678-1234-5678-1234-567812345678"
+    write(paths.provisioned_file, {"vm_id": vm_id})
+    write(paths.user_config_file, {"vm_id": "87654321-4321-8765-4321-876543218765"})
+    assert store(paths).load().vm_id == vm_id
+
+
 def test_save_overrides_round_trip_and_mode(paths):
     st = store(paths)
     st.save_overrides({KEY_URL: "http://10.0.2.2:9000/", KEY_TOKEN: " new-token\n"})
     s = st.load()
     assert s.backend_url == "http://10.0.2.2:9000" and s.token == "new-token"
     assert stat.S_IMODE(paths.user_config_file.stat().st_mode) == 0o600
-    assert json.loads(paths.user_config_file.read_text()) == {"backend_url": "http://10.0.2.2:9000", "token": "new-token"}
+    saved = json.loads(paths.user_config_file.read_text())
+    assert saved == {"backend_url": "http://10.0.2.2:9000", "token": "new-token", "vm_id": s.vm_id}
     assert [p.name for p in paths.config_dir.iterdir()] == ["config.json"]  # no temp files left
 
 

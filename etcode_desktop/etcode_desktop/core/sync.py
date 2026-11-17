@@ -1,9 +1,7 @@
-"""Keeps the local session store and the backend in step.
+"""Refreshes the VM's local session list without discovering sessions from the backend.
 
-* :meth:`SessionSync.sync` imports the backend's sessions that the store doesn't know,
-  refreshes the known ones, and marks local sessions that the backend no longer has as
-  ``missing``. Without ``GET /sessions`` (an older backend) it refreshes the most recent local
-  sessions one by one instead.
+* :meth:`SessionSync.sync` refreshes locally known sessions one by one and marks a session
+  ``missing`` only after an individual 404. It never calls `GET /sessions`.
 * :meth:`SessionSync.create` creates a session and writes its id to the store **before it
   returns**, so that a crash right after creation doesn't orphan the session.
 * :meth:`SessionSync.attach` adds a session by its id (for an older backend, or a session that was
@@ -22,21 +20,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from .api import BackendClient
-from .errors import NotFound, Unsupported
-from .models import SessionMeta
+from .errors import NotFound
 from .store import Scope, SessionRecord, SessionStore, StoreError
 
 log = logging.getLogger(__name__)
 
-PAGE_SIZE = 500  # the backend's maximum
-MAX_PAGES = 100  # a safety net against a backend that never stops
-MAX_REFRESH = 50  # sessions refreshed one by one when the backend can't list them
+PAGE_SIZE = 500  # accepted as a legacy constructor default; list_sessions is not polled
+MAX_REFRESH = 50  # cap automatic metadata refresh work per pass
 
 
 @dataclass(frozen=True)
 class SyncResult:
-    supported: bool  # the backend has GET /sessions
-    complete: bool  # every session of the backend was fetched (always False when unsupported)
+    supported: bool  # whether backend-list discovery was used (always False by design)
+    complete: bool  # whether a complete backend listing was fetched (always False by design)
     imported: int = 0
     updated: int = 0
     marked_missing: int = 0
@@ -59,42 +55,17 @@ class SessionSync:
     # --- sync ---------------------------------------------------------------------------
 
     def sync(self, skip: Collection[str] = ()) -> SyncResult:
-        """Bring the store up to date. ``skip`` are sessions that something else is following live."""
-        try:
-            listing, complete = self._fetch_all()
-        except Unsupported:
-            return self._refresh_individually(skip)
+        """Refresh locally recorded sessions without discovering chats from the backend.
 
-        merged = self._store.merge_listing(self._scope, listing)
-        result = {"imported": len(merged.imported), "updated": len(merged.updated), "marked_missing": 0, "refreshed": 0}
-        if complete:
-            # Not being listed is not proof of absence: the listing is a snapshot, and sessions can move
-            # between its pages. So each one is asked about before it is called missing.
-            listed = {m.id for m in listing}
-            for session_id in self._store.unlisted(self._scope, listed):
-                if session_id in skip:
-                    continue
-                result["refreshed"] += 1
-                if not self._refresh_one(session_id):
-                    result["marked_missing"] += 1
-        return SyncResult(supported=True, complete=complete, **result)
-
-    def _fetch_all(self) -> tuple[list[SessionMeta], bool]:
-        collected: dict[str, SessionMeta] = {}
-        offset = 0
-        for _ in range(MAX_PAGES):
-            page = self._client.list_sessions(limit=self._page_size, offset=offset)
-            for meta in page.sessions:
-                collected.setdefault(meta.id, meta)
-            offset += len(page.sessions)
-            if not page.sessions or offset >= page.total:
-                return list(collected.values()), True
-        log.warning("stopped listing sessions after %d pages", MAX_PAGES)
-        return list(collected.values()), False
+        Session IDs are saved on creation or explicit attachment. ``GET /sessions`` remains
+        supported by the backend, but desktop synchronization deliberately never calls it.
+        """
+        return self._refresh_individually(skip)
 
     def _refresh_individually(self, skip: Collection[str]) -> SyncResult:
         refreshed = marked = 0
-        candidates = [r.id for r in self._store.list(self._scope) if r.id not in skip][:self._max_refresh]
+        candidates = [r.id for r in self._store.list(self._scope)
+                      if r.id not in skip and not r.is_missing][:self._max_refresh]
         for session_id in candidates:
             refreshed += 1
             if not self._refresh_one(session_id):

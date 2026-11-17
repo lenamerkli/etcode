@@ -37,6 +37,24 @@ def test_scope_uses_a_fingerprint_not_the_token():
     assert OTHER_TOKEN != SCOPE != OTHER_URL
 
 
+def test_vm_scope_is_stable_across_tokens_and_isolated_between_vms():
+    vm = Scope.for_vm(URL, "vm-123")
+    rotated = Scope.for_vm(URL + "/", "vm-123")
+    other = Scope.for_vm(URL, "vm-456")
+    assert vm == rotated and vm != other
+
+
+def test_migrate_scope_preserves_existing_session_metadata(store):
+    vm_scope = Scope.for_vm(URL, "vm-123")
+    store.upsert_from_meta(SCOPE, meta("s1", title="saved", status="generating"))
+    store.set_archived(SCOPE, "s1", True)
+    assert store.migrate_scope(SCOPE, vm_scope) == 1
+    assert store.get(vm_scope, "s1").title == "saved"
+    assert store.get(vm_scope, "s1").archived
+    assert store.get(SCOPE, "s1") is not None  # rollback copy remains
+    assert store.migrate_scope(SCOPE, vm_scope) == 0
+
+
 def test_sessions_are_isolated_by_token_and_by_url(store):
     store.upsert_from_meta(SCOPE, meta("s1"))
     store.upsert_from_meta(OTHER_TOKEN, meta("s2"))

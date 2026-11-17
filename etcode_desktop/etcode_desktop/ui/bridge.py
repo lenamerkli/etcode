@@ -122,7 +122,11 @@ class BackendBridge(QObject):
             self._client.close()
         self._epoch += 1
         self._settings = settings
-        self._scope = Scope.for_token(settings.backend_url, settings.token)
+        self._scope = (Scope.for_vm(settings.backend_url, settings.vm_id) if settings.vm_id
+                       else Scope.for_token(settings.backend_url, settings.token))
+        if settings.vm_id and settings.token:
+            # Preserve the local list created by older releases, which was keyed by token.
+            self._store.migrate_scope(Scope.for_token(settings.backend_url, settings.token), self._scope)
         self._client = self._make_client(settings)
         self._sync = SessionSync(self._client, self._store, self._scope)
         self._models = None

@@ -1,15 +1,13 @@
-"""The local session store: which sessions exist, per backend and token.
+"""The local session store: which sessions this VM has created or explicitly added.
 
-The backend ties sessions to the bearer token, so every row is keyed by
-``(backend_url, token fingerprint, session id)``. A :class:`Scope` is that pair of the
-first two. Switching the token or the URL in the GUI switches the scope, and the sidebar
-then shows that token's sessions only. The token itself is never stored, only a
-fingerprint of it.
+Rows are keyed by ``(backend_url, VM identity, session id)``. The backend still checks bearer
+-token authorization; this local scope determines which visible chats are remembered by this VM.
+Token rotation therefore does not change the local list. The token itself is never stored.
 
 The file is SQLite (WAL mode) with mode 0600. Every thread gets its own connection, and
 writes are serialised. A database that can't be read is moved aside and replaced by an
-empty one. Nothing important is lost then, because the backend knows the sessions and
-:mod:`etcode_desktop.core.sync` imports them again.
+empty one. Sessions not present in the local store can be added explicitly by ID, provided
+the backend authorizes the current token.
 """
 from __future__ import annotations
 
@@ -117,7 +115,15 @@ class Scope:
 
     @classmethod
     def for_token(cls, backend_url: str, token: str) -> Scope:
+        """Legacy scope helper retained for callers/tests without a stable VM identity."""
         return cls(backend_url.rstrip("/"), token_fingerprint(token))
+
+    @classmethod
+    def for_vm(cls, backend_url: str, vm_id: str) -> Scope:
+        """A local chat-list scope that survives bearer-token rotation on the same VM."""
+        if not vm_id or not isinstance(vm_id, str):
+            raise ValueError("a stable VM id is required")
+        return cls(backend_url.rstrip("/"), "vm:" + vm_id)
 
 
 @dataclass(frozen=True)
@@ -279,6 +285,25 @@ class SessionStore:
             connection.execute("COMMIT")
 
     # --- sessions -------------------------------------------------------------------------
+
+    def migrate_scope(self, old: Scope, new: Scope) -> int:
+        """Copy locally remembered sessions from the former token scope into a VM scope.
+
+        This one-time compatibility path keeps chats already stored by pre-VM-identity versions
+        visible after upgrade. Existing rows are retained in the old scope as a rollback aid.
+        """
+        if old == new:
+            return 0
+        with self._write() as connection:
+            before = connection.total_changes
+            connection.execute(
+                "INSERT OR IGNORE INTO sessions(id,backend_url,token_fp,title,title_custom,model,status,cost_total,"
+                "created_at,updated_at,last_opened,last_seen_index,archived) "
+                "SELECT id,backend_url,?,title,title_custom,model,status,cost_total,created_at,updated_at,"
+                "last_opened,last_seen_index,archived FROM sessions WHERE backend_url=? AND token_fp=?",
+                (new.token_fp, old.backend_url, old.token_fp),
+            )
+            return connection.total_changes - before
 
     def get(self, scope: Scope, session_id: str) -> SessionRecord | None:
         row = self._connect().execute(

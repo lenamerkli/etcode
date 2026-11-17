@@ -114,6 +114,8 @@ class BackendSettingsTest(unittest.TestCase):
 class SeedWriteFilesTest(unittest.TestCase):
     def test_json_has_the_keys_the_desktop_reads(self):
         self.assertEqual(json.loads(render_desktop_json("http://h:1", "tok")), {"backend_url": "http://h:1", "token": "tok"})
+        self.assertEqual(json.loads(render_desktop_json("", "", "12345678-1234-5678-1234-567812345678")),
+                         {"vm_id": "12345678-1234-5678-1234-567812345678"})
         self.assertEqual(json.loads(render_desktop_json("http://h:1", "")), {"backend_url": "http://h:1"})
         self.assertEqual(json.loads(render_desktop_json("", "tok")), {"token": "tok"})
         self.assertEqual(render_desktop_json("", ""), "")
@@ -167,7 +169,7 @@ class SeedWriteFilesTest(unittest.TestCase):
             iso_path = Path(tmp) / "seed.iso"
             iso_path.write_bytes(b"old")
             os.chmod(iso_path, 0o644)  # an existing, readable seed must become private as well
-            write_seed_iso(iso_path, "inst-1", "etcode-inst", (), "http://10.0.2.2:8765", "tok-xyz")
+            write_seed_iso(iso_path, "12345678-1234-5678-1234-567812345678", "etcode-inst", (), "http://10.0.2.2:8765", "tok-xyz")
             self.assertEqual(stat.S_IMODE(iso_path.stat().st_mode), 0o600)
             iso = pycdlib.PyCdlib()
             iso.open(str(iso_path))
@@ -177,6 +179,7 @@ class SeedWriteFilesTest(unittest.TestCase):
             text = extract.read_text()
         self.assertIn("/etc/etcode/desktop.json", text)
         self.assertIn("tok-xyz", text)
+        self.assertIn('"vm_id": "12345678-1234-5678-1234-567812345678"', text)
 
 
 def make_manager(tmp: str, **settings_kwargs) -> VMManager:
