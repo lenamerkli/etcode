@@ -8,6 +8,9 @@ The manager keeps its state under the ``etcode-manager`` directory:
 
 ``backend_url`` and ``backend_token`` in ``config.json`` are the defaults for the etcode backend that the
 desktop app inside a VM talks to. They are copied into each new VM (``vm.json`` and the cloud-init seed).
+
+``scaling`` selects the default screen filter for new manager windows (``area`` or ``lanczos``). The same
+values can be changed from the manager's Settings dialog, which writes them back to ``config.json``.
 """
 
 from __future__ import annotations
@@ -31,7 +34,20 @@ CONFIG_FILE = MANAGER_ROOT / "config.json"
 # The host as seen from a guest behind QEMU's user-mode networking (``-netdev user``).
 DEFAULT_BACKEND_URL = "http://10.0.2.2:8765"
 
-_CONFIG_KEYS = ("base_image", "vms_dir", "ssh_public_key", "backend_url", "backend_token")
+# Screen resampling defaults ("area" matches ``ScalingFilter.AREA``). Kept as strings so that this module
+# (and config-only code such as the seed writer) does not need to import Qt.
+DEFAULT_SCALING = "area"
+SCALING_CHOICES = ("area", "lanczos")
+_SCALING_ALIASES = {
+    "area": "area",
+    "smooth": "area",
+    "lanczos": "lanczos",
+    "sharper": "lanczos",
+}
+
+_CONFIG_KEYS = (
+    "base_image", "vms_dir", "ssh_public_key", "backend_url", "backend_token", "scaling", "scaling_filter",
+)
 
 
 def normalize_backend_url(value: object) -> str:
@@ -72,6 +88,25 @@ def normalize_backend_token(value: object) -> str:
     return value
 
 
+def normalize_scaling(value: object) -> str:
+    """Return a canonical scaling name (``area`` or ``lanczos``), or raise ``ValueError``.
+
+    The user-facing names from the selector ("Smooth", "Sharper") are accepted too, so a hand-written
+    ``config.json`` can use whichever name is clearer.
+    """
+    if not isinstance(value, str):
+        raise ValueError("The scaling algorithm must be text.")
+    key = value.strip().lower()
+    if not key:
+        return DEFAULT_SCALING
+    try:
+        return _SCALING_ALIASES[key]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown scaling algorithm {value!r}; use 'area' (Smooth) or 'lanczos' (Sharper)."
+        ) from exc
+
+
 def _find_tool(*candidates: str) -> Path | None:
     """Locate an executable in PATH, with a few well-known extra locations."""
     for name in candidates:
@@ -98,7 +133,22 @@ class Settings:
     ssh_public_key: str = ""
     backend_url: str = DEFAULT_BACKEND_URL     # default for new VMs: where the desktop app in the VM finds the backend
     backend_token: str = field(default="", repr=False)  # default for new VMs. A secret: never print or log it
+    scaling: str = DEFAULT_SCALING             # default screen filter for the manager window ("area" / "lanczos")
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Also normalises an enum or the user-facing alias when Settings is built in code.
+        self.scaling = normalize_scaling(self.scaling)
+
+    @property
+    def scaling_filter(self):
+        """The default as a :class:`~etcode_manager.scaling.ScalingFilter` (imported lazily; config stays Qt-free)."""
+        from .scaling import ScalingFilter
+        return ScalingFilter(self.scaling)
+
+    @scaling_filter.setter
+    def scaling_filter(self, value) -> None:
+        self.scaling = normalize_scaling(getattr(value, "value", value))
 
     def require_tools(self) -> None:
         missing = [
@@ -137,6 +187,11 @@ def load_settings() -> Settings:
         backend_token = normalize_backend_token(cfg.get("backend_token", ""))
     except ValueError as exc:  # the message never contains the token
         raise RuntimeError(f"Invalid backend setting in {CONFIG_FILE}: {exc}") from exc
+    try:
+        # ``scaling_filter`` is the historical/descriptive alias; ``scaling`` wins when both exist.
+        scaling = normalize_scaling(cfg.get("scaling", cfg.get("scaling_filter", DEFAULT_SCALING)))
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid scaling setting in {CONFIG_FILE}: {exc}") from exc
 
     settings = Settings(
         base_image=base_image.resolve(),
@@ -146,9 +201,53 @@ def load_settings() -> Settings:
         ssh_public_key=str(cfg.get("ssh_public_key", "")).strip(),
         backend_url=backend_url,
         backend_token=backend_token,
+        scaling=scaling,
         extra={k: v for k, v in cfg.items() if k not in _CONFIG_KEYS},
     )
     return settings
+
+
+def save_settings(settings: Settings, path: Path | None = None) -> Path:
+    """Persist the user-editable defaults to ``config.json`` and return the file path.
+
+    The backend URL/token and the scaling default are written; every other key that is already in the file
+    (``base_image``, ``vms_dir``, custom keys, ...) is kept. The file can contain a token, so it is written
+    atomically with mode 0600, just like ``vm.json`` and the seed ISO.
+    """
+    path = CONFIG_FILE if path is None else path
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot update {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Cannot update {path}: the top level is not a JSON object.")
+
+    data["backend_url"] = normalize_backend_url(settings.backend_url)
+    data["backend_token"] = normalize_backend_token(settings.backend_token)
+    data["scaling"] = normalize_scaling(settings.scaling)
+    data.pop("scaling_filter", None)  # the alias is read for compatibility; write only the canonical key
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=4)
+            stream.write("\n")
+        try:
+            os.chmod(tmp, 0o600)  # a leftover temp file keeps its old mode otherwise
+        except OSError:
+            pass  # not every file system has modes (Windows)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def detect_accel() -> str:

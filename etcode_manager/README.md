@@ -38,13 +38,16 @@ python -m etcode_manager
 
 The **Scaling** selector next to the screen connection buttons switches between:
 
-* **Smooth (area)** — the default. Uses Qt's area-averaged reduction to avoid dropping thin
-  glyph strokes when the 1920×1080 desktop is fitted into a much smaller pane. Enlargement
-  uses Qt's smooth interpolation.
+* **Smooth (area)** — the default unless `scaling` in `config.json` says otherwise. Uses Qt's
+  area-averaged reduction to avoid dropping thin glyph strokes when the 1920×1080 desktop is
+  fitted into a much smaller pane. Enlargement uses Qt's smooth interpolation.
 * **Sharper (Lanczos)** — uses Pillow's antialiased Lanczos-3 filter for crisper text and
   edges. It costs more CPU per changing frame and can introduce faint halos; choose Smooth
-  if you prefer softer edges or are viewing fast-moving content. The selection lasts for
-  the current manager window and does not change the guest's resolution.
+  if you prefer softer edges or are viewing fast-moving content.
+
+Changing the selector applies to the current manager window. To change the default for future
+windows, open **Settings…** in the toolbar: it saves the choice as `scaling` (`"area"` or
+`"lanczos"`) in `config.json`. Neither the selector nor the default changes the guest's resolution.
 
 Both modes resize the **original framebuffer directly to the physical output pixel size**,
 including fractional display scaling (125%, 150%, etc.). The result and letterbox position
@@ -67,13 +70,23 @@ settings can still help on small screens.
   "vms_dir": "/path/to/vms",
   "ssh_public_key": "ssh-ed25519 AAAA... you@host",
   "backend_url": "http://10.0.2.2:8765",
-  "backend_token": "the access token for etcode_backend"
+  "backend_token": "the access token for etcode_backend",
+  "scaling": "area"
 }
 ```
 
 `ssh_public_key` is baked into each new VM's cloud-init `user-data` so you
 can SSH into the `agent` user. `backend_url` and `backend_token` are the defaults for the
 etcode backend that the desktop app in a VM talks to (see "The etcode desktop app in the VM").
+`scaling` is the default screen filter (`area` = Smooth, `lanczos` = Sharper; `smooth` and
+`sharper` are accepted as aliases).
+
+The manager's **Settings…** dialog changes these defaults without editing the file by hand:
+the default backend URL and token for VMs created from now on, and the default scaling algorithm.
+It keeps all other keys in `config.json`. Existing VMs keep the backend settings they were created
+with (their token lives in their own `vm.json`). Because `config.json` can hold the token, the
+manager writes it atomically with mode 0600, like `vm.json` and `seed.iso`.
+
 The VMs are stored as:
 
 ```
@@ -93,9 +106,10 @@ closed), and `/etc/xdg/autostart/etcode-desktop.desktop` starts it maximized whe
 seconds after the panel. The manager does not launch it.
 
 **Backend URL and token.** The *New VM* dialog has the fields *Backend URL* and *Backend token*, prefilled from
-`backend_url` and `backend_token` in `config.json` (default URL `http://10.0.2.2:8765`: the host, as seen from
-a VM behind QEMU's user-mode network; a server is just another URL). Change them per VM to give one VM its own
-token. An empty URL means the default, an empty token means that the app asks for one when it starts.
+`backend_url` and `backend_token` in `config.json` or from the manager's **Settings…** dialog (default URL
+`http://10.0.2.2:8765`: the host, as seen from a VM behind QEMU's user-mode network; a server is just another
+URL). Change them per VM to give one VM its own token. An empty URL means the default, an empty token
+means that the app asks for one when it starts.
 The values are stored in the VM's `vm.json` (the seed needs them whenever it is regenerated), and `seed.py`
 delivers them with a cloud-init `write_files` entry to `/etc/etcode/desktop.json` in the VM (owner `agent`,
 mode 0600). The app reads that file as its "provisioned" layer.
@@ -103,9 +117,10 @@ mode 0600). The app reads that file as its "provisioned" layer.
 * **Changes do not reach a VM that has booted.** cloud-init writes the file once per instance id, and the
   manager keeps the instance id stable. To change the token of an existing VM, use the connection dialog of
   the desktop app (the gear in its status bar). A value set there wins over the provisioned one.
-* **The token is a secret.** It is in `vm.json` and `seed.iso` on your disk (both mode 0600), and in the VM
-  in `/etc/etcode/desktop.json`. **The model can read it**: it runs commands as `agent`, who can also use
-  `sudo`. A backend token only reaches the sessions of its own owner, so use a token that is only for etcode VMs
+* **The token is a secret.** It is in `config.json` (mode 0600 after the manager saves it), `vm.json` and
+  `seed.iso` on your disk (both mode 0600), and in the VM in `/etc/etcode/desktop.json`.
+  **The model can read it**: it runs commands as `agent`, who can also use `sudo`. A backend token only
+  reaches the sessions of its own owner, so use a token that is only for etcode VMs
   (one per VM when sessions must be kept apart). Never put a token into the template image: the build scripts
   contain none, and a test checks that.
 * **Use HTTPS** for a backend that is not on your own machine or network. The desktop app warns about `http://`
@@ -128,7 +143,9 @@ python -m unittest discover -s tests
 
 `tests/test_desktop_provisioning.py` covers the backend settings, the `write_files` section of the seed (valid YAML for
 any token, and the JSON is what the desktop app reads), the private files, the dialog, and that the image scripts,
-packaging files and panel layout fit together. `tests/test_scaling.py` covers area/Lanczos filtering, aliasing,
+packaging files and panel layout fit together. `tests/test_settings.py` covers the default-token/scaling settings,
+`config.json` migration and privacy, the Settings dialog, and the window that applies those defaults.
+`tests/test_scaling.py` covers area/Lanczos filtering, aliasing,
 cache invalidation and input mapping. It also checks actual offscreen painting in subprocesses at 100%, 125%, 150%
 and 200% display scaling: the displayed pixels must exactly match a single resampling of the original frame.
 `tests/test_gui_smoke.py` checks the scaling selector and other screen controls.

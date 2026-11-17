@@ -29,14 +29,14 @@ class VncView(QWidget):
     error = Signal(str)
     _frame_ready = Signal(object)  # QImage, private
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, scaling_filter: ScalingFilter | str = ScalingFilter.AREA):
         super().__init__(parent)
         self._client: RFBClient | None = None
         self._image: QImage | None = None
         self._button_mask = 0
         self._pointer = (0, 0)     # last known framebuffer coords
         self._status = "Not connected"
-        self._scaling_filter = ScalingFilter.AREA
+        self._scaling_filter = ScalingFilter(scaling_filter)
         self._scaled_image: QImage | None = None
         self._scaled_key: tuple | None = None
 

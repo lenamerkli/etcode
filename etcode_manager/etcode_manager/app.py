@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .config import (
     DEFAULT_BACKEND_URL, Settings, detect_accel, normalize_backend_token, normalize_backend_url,
+    normalize_scaling, save_settings,
 )
 from .vm import VM, VMManager, VMError
 from .view import VncView
@@ -124,6 +125,110 @@ class NewVMDialog(QDialog):
         )
 
 
+class SettingsDialog(QDialog):
+    """Edits the defaults that apply to every VM created from now on, and the screen scaling default.
+
+    The backend token is the same secret that each VM receives (in its ``vm.json`` and cloud-init seed). It is
+    shown masked by default. Saving writes ``config.json`` privately, because that file now holds the token.
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        backend_url: str = DEFAULT_BACKEND_URL,
+        backend_token: str = "",
+        scaling: ScalingFilter | str = ScalingFilter.AREA,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        form = QFormLayout(self)
+
+        intro = QLabel(
+            "These defaults are used for VMs you create from now on. "
+            "Existing VMs keep the settings they were created with."
+        )
+        intro.setWordWrap(True)
+        form.addRow(intro)
+
+        self.backend_url_edit = QLineEdit(backend_url)
+        self.backend_url_edit.setObjectName("defaultBackendUrl")
+        self.backend_url_edit.setPlaceholderText(DEFAULT_BACKEND_URL)
+        self.backend_url_edit.setToolTip(
+            "Where the etcode desktop app in a new VM finds the backend. "
+            "The host is 10.0.2.2 as seen from the VM."
+        )
+        form.addRow("Default backend URL:", self.backend_url_edit)
+
+        self.token_edit = QLineEdit(backend_token)
+        self.token_edit.setObjectName("defaultBackendToken")
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setPlaceholderText("none: each VM's app asks for one")
+        self.token_edit.setToolTip(
+            "The access token that new VMs use. It is stored in config.json (private to you) and copied into "
+            "each new VM's vm.json and seed.iso, where the model can read it. Use a token that is only for "
+            "etcode VMs."
+        )
+        form.addRow("Default backend token:", self.token_edit)
+
+        self.show_token = QCheckBox("Show the token")
+        self.show_token.setObjectName("showDefaultToken")
+        self.show_token.toggled.connect(
+            lambda shown: self.token_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password
+            )
+        )
+        form.addRow("", self.show_token)
+
+        self.scaling_combo = QComboBox()
+        self.scaling_combo.setObjectName("defaultScaling")
+        self.scaling_combo.addItem("Smooth (area)", ScalingFilter.AREA)
+        self.scaling_combo.addItem("Sharper (Lanczos)", ScalingFilter.LANCZOS)
+        self.scaling_combo.setToolTip(
+            "The screen filter for this and future manager windows. "
+            "Smooth is area-averaged and fast; Sharper uses Lanczos-3 and costs more CPU."
+        )
+        index = self.scaling_combo.findData(ScalingFilter(normalize_scaling(scaling)))
+        self.scaling_combo.setCurrentIndex(max(0, index))
+        form.addRow("Default scaling:", self.scaling_combo)
+
+        self.error_label = QLabel()
+        self.error_label.setObjectName("settingsError")
+        self.error_label.setStyleSheet("color: #b00020;")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        form.addRow(self.error_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Save")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def accept(self) -> None:
+        """Close only if every value is valid; otherwise keep the dialog open and explain why."""
+        try:
+            self.values()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            self.error_label.show()
+            return
+        super().accept()
+
+    def values(self) -> tuple[str, str, ScalingFilter]:
+        """``(backend_url, backend_token, scaling)``, cleaned. Raises ``ValueError`` with a user-facing message."""
+        return (
+            normalize_backend_url(self.backend_url_edit.text()),
+            normalize_backend_token(self.token_edit.text()),
+            ScalingFilter(self.scaling_combo.currentData()),
+        )
+
+    # A descriptive alias; there are several defaults, and callers read better with it.
+    def defaults(self) -> tuple[str, str, ScalingFilter]:
+        return self.values()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings, manager: VMManager):
         super().__init__()
@@ -143,11 +248,16 @@ class MainWindow(QMainWindow):
         self.act_stop.triggered.connect(self.on_stop)
         self.act_delete = QAction("Delete", self)
         self.act_delete.triggered.connect(self.on_delete)
+        self.act_settings = QAction("Settings…", self)
+        self.act_settings.setShortcut("Ctrl+,")
+        self.act_settings.triggered.connect(self.on_settings)
 
         toolbar = self.addToolBar("VM")
         toolbar.setMovable(False)
         for action in (self.act_new, self.act_start, self.act_stop, self.act_delete):
             toolbar.addAction(action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.act_settings)
 
         # ---- splitter: VM list | screen
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -163,7 +273,7 @@ class MainWindow(QMainWindow):
         self.info = QLabel("No VM selected")
         layout.addWidget(self.info)
 
-        self.screen = VncView()
+        self.screen = VncView(scaling_filter=self.settings.scaling_filter)
         self.screen.connected.connect(self.on_screen_connected)
         self.screen.disconnected.connect(self.on_screen_disconnected)
         self.screen.error.connect(self.on_screen_error)
@@ -187,7 +297,11 @@ class MainWindow(QMainWindow):
         self.scaling_combo.addItem("Sharper (Lanczos)", ScalingFilter.LANCZOS)
         self.scaling_combo.setToolTip(
             "Smooth: area-averaged downscaling, fast and stable for small text.\n"
-            "Sharper: antialiased Lanczos-3, crisper edges but more CPU use and possible faint halos."
+            "Sharper: antialiased Lanczos-3, crisper edges but more CPU use and possible faint halos.\n"
+            "The default for this and future windows can be changed in Settings."
+        )
+        self.scaling_combo.setCurrentIndex(
+            max(0, self.scaling_combo.findData(self.settings.scaling_filter))
         )
         scaling_label.setBuddy(self.scaling_combo)
         self.scaling_combo.currentIndexChanged.connect(
@@ -319,6 +433,40 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Created VM '{vm.name}'")
         self.refresh()
+
+    def on_settings(self) -> None:
+        """Edit the defaults for future VMs and the screen filter; persist them to config.json."""
+        dialog = SettingsDialog(
+            self,
+            backend_url=self.settings.backend_url,
+            backend_token=self.settings.backend_token,
+            scaling=self.settings.scaling_filter,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        backend_url, backend_token, scaling = dialog.values()
+        previous = (self.settings.backend_url, self.settings.backend_token, self.settings.scaling)
+        self.settings.backend_url = backend_url
+        self.settings.backend_token = backend_token
+        self.settings.scaling_filter = scaling
+        try:
+            save_settings(self.settings)
+        except (RuntimeError, OSError, ValueError) as exc:
+            # Keep the in-memory defaults consistent with what is actually on disk.
+            self.settings.backend_url, self.settings.backend_token, self.settings.scaling = previous
+            self._select_scaling(self.settings.scaling_filter)
+            QMessageBox.warning(self, "Cannot save settings", str(exc))
+            return
+        self._select_scaling(scaling)
+        self.statusBar().showMessage("Settings saved")
+
+    def _select_scaling(self, scaling: ScalingFilter) -> None:
+        """Select a filter in the screen selector, which also applies it to the current screen."""
+        index = self.scaling_combo.findData(scaling)
+        if index >= 0:
+            self.scaling_combo.setCurrentIndex(index)
+        else:
+            self.screen.set_scaling_filter(scaling)
 
     def on_start(self) -> None:
         vm = self.selected_vm()
