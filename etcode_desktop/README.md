@@ -64,12 +64,13 @@ joined where it is. Sessions you opened keep working in the background while you
 
 ## Tools
 
-The model works in the VM through five tools. The app runs them **automatically** (there is no
+The model works in the VM through six tools. The app runs them **automatically** (there is no
 confirmation step: the VM is the sandbox, and the user `agent` has passwordless sudo anyway).
 
 | Tool | What it does |
 | --- | --- |
 | `bash` | Runs `bash -c <command>` in a directory, with a timeout (60 s by default). The result is the return code, stderr and stdout, cut to `max_chars`. |
+| `interactive_terminal` | Keeps a PTY shell by terminal ID within one chat so the model can interact with TUIs using `type`, `press`, `wait` and `print` actions. A terminal ID cannot be reused after the desktop app exits; the local store remembers cleaned-up IDs and returns an error if one is requested again. |
 | `read_file` | Reads part of a text file: from the later of `start_line` and `start_char`, up to the first of `end_line`, `end_char` and `max_chars`. The result says what was read and how much was left out. |
 | `write_to_file` | Writes a whole file (atomically, keeping its mode) and creates missing directories. |
 | `replace_in_file` | Replaces **every** occurrence of a text in a file and reports where each one was. |
@@ -85,8 +86,10 @@ Relative paths are relative to the home directory. `~` is the home directory.
   result was journaled and accepted. So "write the file, run a command on it, then read it back" in
   one message works exactly as written. The model may still emit several independent calls in one
   response; only their execution is serialized.
-* **Stop** ends running commands at once, with everything they started (SIGTERM, then SIGKILL), and
-  cancels the calls at the backend. A stopped call sends no result.
+* **Stop** cancels the current tool action and cancels the call at the backend. A running `bash` command and its
+  process group are terminated (SIGTERM, then SIGKILL). An `interactive_terminal` shell is persistent by design;
+  Stop interrupts the action sequence, while the shell remains available for later interaction (use `CTRL+C` to
+  interrupt its foreground program). A stopped call sends no result.
 * **A timeout** ends the command and everything it started and reports the output so far. A background
   process that was started on purpose (a server, say) keeps running when the command is over.
 * **Restarts are safe.** Every call is written to a journal before it runs, and its result before it is
@@ -94,6 +97,7 @@ Relative paths are relative to the home directory. `~` is the home directory.
   *running* when the app died is **not run again**: the model is told that the outcome is unknown and can look
   at the state itself. When the app starts, sessions that were waiting for tool results are picked up
   without being opened.
+* **Terminal cleanup.** Live PTY processes are owned by the desktop process and are ended on shutdown (and the shell is signaled if the app crashes). For each chat, `store.sqlite3` retains the IDs of terminals that were cleaned up. Asking for one of those IDs returns an error instead of silently starting a replacement.
 * **Errors are answers.** A bad call, a missing file or a failing tool becomes an `Error: ...` text for the model,
   because the session waits for a result for every call.
 * The command does not get the app's `ETCODE_API_TOKEN`. But it runs as the same user, so it can read the

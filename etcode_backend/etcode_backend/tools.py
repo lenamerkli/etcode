@@ -93,6 +93,23 @@ DEFAULT_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "interactive_terminal",
+            "description": "Instead of just running a command and getting stdout and stderr, this tool allows for all functionality of an interactive terminal including TUIs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string", "description": "A terminal ID scoped to this chat. A new ID starts a terminal; reuse it to interact with that terminal. IDs cleaned up after an app restart cannot be reused."},
+                    "actions": {"type": "string", "description": "A comma-separated list of terminal actions to execute sequentially. See `/home/agent/skills/interactive_terminal.md` for syntax."},
+                    "height": {"type": "integer", "description": "Terminal height in rows (1-200). Defaults to 50 for a new session and preserves the current size otherwise."},
+                    "width": {"type": "integer", "description": "Terminal width in columns (1-400). Defaults to 160 for a new session and preserves the current size otherwise."}
+                },
+                "required": ["session", "actions"]
+            }
+        }
+    }
 ]
 
 WEBSEARCH_TOOL: dict[str, Any] = {

@@ -52,7 +52,7 @@ python3 -m venv /opt/etcode/.venv
 # ---------------------------------------------------------------------------
 log "installing the etcode desktop app dependencies into /opt/etcode/.venv"
 /opt/etcode/.venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
-    "PySide6-Essentials>=6.5,<7" "requests>=2.31"
+    "PySide6-Essentials>=6.5,<7" "requests>=2.31" "pyte>=0.8.2"
 
 log "checking the etcode desktop app (virt-customize does not show warnings from --run scripts)"
 qt_dir="$(/opt/etcode/.venv/bin/python -c 'import os, PySide6; print(os.path.dirname(PySide6.__file__))')/Qt"

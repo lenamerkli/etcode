@@ -9,8 +9,8 @@ from etcode_desktop.core.tools.schemas_data import CLIENT_TOOLS
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "etcode_backend"
 
 
-def test_the_five_client_tools_are_known():
-    assert TOOL_NAMES == {"bash", "read_file", "write_to_file", "replace_in_file", "view_image"}
+def test_the_client_tools_are_known():
+    assert TOOL_NAMES == {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "view_image"}
     assert "websearch" not in TOOL_NAMES  # the backend runs it
 
 

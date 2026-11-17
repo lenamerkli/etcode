@@ -732,7 +732,8 @@ class SessionController:
                     self._post_result(call.id, content)
                 return
             self._emit(ToolStarted(call.id))
-            content = _limit(self._tools.run(call.name, call.arguments, self._client, token))
+            content = _limit(self._tools.run(call.name, call.arguments, self._client, token,
+                                             chat_id=self.session_id, backend_url=self._scope.backend_url))
             duration = time.monotonic() - started
             self._journal(self._store.journal_done, call.id, content)
         elif kind == "interrupted":

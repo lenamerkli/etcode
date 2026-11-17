@@ -95,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.exception("could not prune the tool journal")
     # Tool calls of one round now run one at a time; the pool only bounds concurrent sessions.
     # ``max_parallel_tools`` is deprecated and ignored.
-    tools = ToolRunner()
+    tools = ToolRunner(store=store)
     bridge = BackendBridge(store, settings)
     config = ConfigStore(paths)
     pictures = ImageLoader(paths.data_dir / "images", lambda: bridge.client)
@@ -116,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return app.exec()
     finally:
         bridge.stop()
+        tools.shutdown()
         tools.pool.shutdown()
         store.close()
         if guard is not None:

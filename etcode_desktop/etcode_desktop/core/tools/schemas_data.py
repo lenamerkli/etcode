@@ -1,8 +1,8 @@
 """The schemas of the tools that this client runs: a copy of the backend's definitions.
 
 The backend (``etcode_backend/tools.py``) is the source. It tells the model what each tool takes,
-and this copy tells the client how to check the arguments the model sends. ``tests/test_tool_schemas.py``
-fails if the two differ, so they change together.
+and this copy tells the client how to check the arguments the model sends.
+``tests/test_tool_schemas.py`` fails if the two differ, so they change together.
 
 ``websearch`` is not here: the backend runs it itself.
 """
@@ -88,6 +88,29 @@ CLIENT_TOOLS: list[dict[str, Any]] = [{'name': 'bash',
                                          'description': 'Whether to read the file in its entirety after the '
                                                         'replacement has taken place'}},
                  'required': ['path', 'search', 'replace']}},
+ {'name': 'interactive_terminal',
+  'description': 'Instead of just running a command and getting stdout and stderr, this tool allows for all '
+                 'functionality of a terminal including TUIs.',
+  'parameters': {'type': 'object',
+                 'properties': {'session': {'type': 'string',
+                                            'description': 'A terminal ID scoped to this chat. A new ID '
+                                                           'starts a terminal; reuse it to interact with '
+                                                           'that terminal. IDs cleaned up after an app '
+                                                           'restart cannot be reused.'},
+                                'actions': {'type': 'string',
+                                            'description': 'A comma-separated list of terminal actions to '
+                                                           'execute sequentially. See '
+                                                           '`/home/agent/skills/interactive_terminal.md` for '
+                                                           'syntax.'},
+                                'height': {'type': 'integer',
+                                           'description': 'Terminal height in rows (1-200). Defaults to 50 '
+                                                          'for a new session and preserves the current size '
+                                                          'otherwise.'},
+                                'width': {'type': 'integer',
+                                          'description': 'Terminal width in columns (1-400). Defaults to 160 '
+                                                         'for a new session and preserves the current size '
+                                                         'otherwise.'}},
+                 'required': ['session', 'actions']}},
  {'name': 'view_image',
   'description': 'View a png, jpeg or webp image.',
   'parameters': {'type': 'object',

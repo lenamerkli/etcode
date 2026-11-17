@@ -11,7 +11,8 @@ NON_UI_MODULES = ["etcode_desktop", "etcode_desktop.paths", "etcode_desktop.conf
                   "etcode_desktop.core.controller", "etcode_desktop.core.session_state", "etcode_desktop.core.describe",
                   "etcode_desktop.core.tools", "etcode_desktop.core.tools.bash", "etcode_desktop.core.tools.files",
                   "etcode_desktop.core.tools.image", "etcode_desktop.core.tools.scheduler", "etcode_desktop.core.tools.schemas",
-                  "etcode_desktop.core.tools.cancel", "etcode_desktop.core.options", "etcode_desktop.core.attachments"]
+                  "etcode_desktop.core.tools.cancel", "etcode_desktop.core.tools.interactive_terminal",
+                  "etcode_desktop.core.options", "etcode_desktop.core.attachments"]
 
 
 def test_non_ui_modules_import_without_qt():

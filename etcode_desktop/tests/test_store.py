@@ -529,7 +529,7 @@ def test_a_version_1_database_is_upgraded_and_keeps_its_data(tmp_path):
     assert store.get(Scope("u", "t"), "s1").title == "kept"
     store.close()
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     check.close()
 
 

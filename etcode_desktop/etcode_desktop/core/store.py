@@ -100,6 +100,19 @@ MIGRATIONS: tuple[str, ...] = (
     DROP TABLE tool_journal;
     ALTER TABLE tool_journal_new RENAME TO tool_journal;
     """,
+    # 4: persistent terminal-session tombstones. Processes are in-memory only, but a chat must
+    # remember IDs that became unusable when the desktop process ended.
+    """
+    CREATE TABLE terminal_sessions (
+      backend_url TEXT NOT NULL,
+      session_id  TEXT NOT NULL,
+      terminal_id TEXT NOT NULL,
+      state       TEXT NOT NULL, -- 'active' or 'cleaned'
+      updated_at  REAL NOT NULL,
+      PRIMARY KEY (backend_url, session_id, terminal_id)
+    );
+    CREATE INDEX terminal_sessions_state ON terminal_sessions(state);
+    """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
 
@@ -466,6 +479,51 @@ class SessionStore:
         with self._write() as connection:
             return connection.execute("DELETE FROM tool_journal WHERE state=? AND COALESCE(finished_at, started_at) < ?",
                                       (JOURNAL_POSTED, cutoff)).rowcount
+
+    # --- terminal session IDs ----------------------------------------------------------------
+
+    def terminal_state(self, backend_url: str, session_id: str, terminal_id: str) -> str | None:
+        row = self._connect().execute(
+            "SELECT state FROM terminal_sessions WHERE backend_url=? AND session_id=? AND terminal_id=?",
+            (backend_url.rstrip("/"), session_id, terminal_id)).fetchone()
+        return row["state"] if row else None
+
+    def terminal_cleaned_ids(self, backend_url: str, session_id: str) -> list[str]:
+        """The terminal IDs that can no longer be resumed in this chat."""
+        rows = self._connect().execute(
+            "SELECT terminal_id FROM terminal_sessions WHERE backend_url=? AND session_id=? AND state='cleaned' "
+            "ORDER BY updated_at,terminal_id", (backend_url.rstrip("/"), session_id))
+        return [row["terminal_id"] for row in rows]
+
+    def terminal_start(self, backend_url: str, session_id: str, terminal_id: str) -> bool:
+        """Claim a fresh ID. False means the ID has already been active/cleaned and must not be recreated."""
+        with self._write() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO terminal_sessions(backend_url,session_id,terminal_id,state,updated_at) "
+                "VALUES (?,?,?,'active',?)",
+                (backend_url.rstrip("/"), session_id, terminal_id, time.time()))
+            return cursor.rowcount == 1
+
+    def terminal_clean(self, backend_url: str, session_id: str, terminal_id: str) -> None:
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE terminal_sessions SET state='cleaned',updated_at=? "
+                "WHERE backend_url=? AND session_id=? AND terminal_id=?",
+                (time.time(), backend_url.rstrip("/"), session_id, terminal_id))
+
+    def terminal_forget_failed_start(self, backend_url: str, session_id: str, terminal_id: str) -> None:
+        """A failed PTY spawn never created a usable session, so allow its ID to be retried."""
+        with self._write() as connection:
+            connection.execute(
+                "DELETE FROM terminal_sessions WHERE backend_url=? AND session_id=? AND terminal_id=? AND state='active'",
+                (backend_url.rstrip("/"), session_id, terminal_id))
+
+    def terminal_clean_all_active(self) -> int:
+        """At app startup, turn prior-process sessions into persistent tombstones."""
+        with self._write() as connection:
+            cursor = connection.execute(
+                "UPDATE terminal_sessions SET state='cleaned',updated_at=? WHERE state='active'", (time.time(),))
+            return cursor.rowcount
 
     # --- small settings (window geometry, last model, ...) -----------------------------------
 

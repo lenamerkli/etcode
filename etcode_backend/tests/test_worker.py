@@ -146,7 +146,7 @@ def test_a_future_backend_tool_uses_the_same_endpoint_and_order(client, worker, 
     monkeypatch.setattr("etcode_backend.sessions.execute_backend_tool",
                         lambda name, arguments, **kw: f"{name}:{arguments['at']}")
     monkeypatch.setattr("etcode_backend.worker.tool_names",
-                        lambda tools: {"bash", "read_file", "write_to_file", "replace_in_file", "websearch", "view_image", "clock"})
+                        lambda tools: {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "websearch", "view_image", "clock"})
     upstream.script = [FakeUpstream.tool_reply([("read_1", "read_file", {"path": "x"}), ("clock_1", "clock", {"at": "noon"})]),
                        FakeUpstream.text_reply("done")]
     sid = new_session(client)

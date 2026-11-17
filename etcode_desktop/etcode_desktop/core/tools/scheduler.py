@@ -24,6 +24,7 @@ from typing import Any
 
 from . import ToolContext, execute_tool
 from .cancel import CancelToken
+from .interactive_terminal import TerminalManager
 
 log = logging.getLogger(__name__)
 
@@ -90,18 +91,26 @@ class BatchCall:
 
 class ToolRunner:
     def __init__(self, pool: ToolPool | None = None, *, execute: Callable[[str, dict[str, Any], ToolContext], list[dict[str, Any]]] = execute_tool,
-                 home: Path | None = None):
+                 home: Path | None = None, store=None):
         self.pool = pool or ToolPool()
         self.home = home or Path.home()
         self._execute = execute
+        self.terminal_manager = TerminalManager(store=store)
 
-    def run(self, name: str, arguments: dict[str, Any], client: Any, cancel: CancelToken) -> list[dict[str, Any]]:
+    def run(self, name: str, arguments: dict[str, Any], client: Any, cancel: CancelToken, *,
+            chat_id: str = "direct", backend_url: str = "local") -> list[dict[str, Any]]:
         """Run one call now, on this thread. Always returns content parts, even if the executor itself breaks."""
         try:
-            return self._execute(name, arguments, ToolContext(client=client, cancel=cancel, home=self.home))
+            return self._execute(name, arguments, ToolContext(client=client, cancel=cancel, home=self.home,
+                                                              terminal_manager=self.terminal_manager,
+                                                              chat_id=chat_id, backend_url=backend_url))
         except Exception as exc:
             log.exception("running the tool %s failed", name)
             return [{"type": "text", "text": f"Error: the tool {name} failed: {type(exc).__name__}: {exc}"}]
+
+    def shutdown(self) -> None:
+        """End all PTY processes and persist terminal-ID tombstones."""
+        self.terminal_manager.shutdown()
 
     def submit_batch(self, calls: Sequence[BatchCall], work: Callable[[BatchCall], Any],
                      *, stop: Callable[[], bool] = lambda: False) -> list[Future]:
