@@ -128,7 +128,11 @@ VIEWIMAGE_TOOL: dict[str, Any] = {
     },
 }
 
-BACKEND_TOOLS = frozenset({"websearch"})  # tools executed by the backend itself
+# Tools whose implementation lives on the backend. The client runs every call of a
+# round in model order and asks the backend to execute these through
+# POST /session/<id>/tool-calls/<call_id>/run. Add a tool here and to
+# backend_tools.execute_backend_tool; clients need no change.
+BACKEND_TOOLS = frozenset({"websearch"})
 
 
 def tools_for(websearch: bool, supports_images: bool) -> list[dict[str, Any]]:

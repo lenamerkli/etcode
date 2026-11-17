@@ -86,16 +86,28 @@ def test_tool_barrier_queue_and_image_workaround(client, worker, upstream):
     assert post_result(client, sid, "call_b", [{"type": "image", "hash": uploaded}]).status_code == 409
 
 
-def test_websearch_only_auto_resumes(client, worker, upstream, monkeypatch):
+def run_backend_tool(client, sid, call_id, headers=A):
+    return client.post(f"/session/{sid}/tool-calls/{call_id}/run", headers=headers)
+
+
+def test_a_websearch_runs_only_through_the_backend_tool_endpoint(client, worker, upstream, monkeypatch):
     class Search:
         def search(self, query):
             assert query.query == "python"
             return [{"title": "Python", "url": "https://python.org", "description": "ok", "age": None}]
-    monkeypatch.setattr("etcode_backend.worker.get_search_provider", lambda s: Search())
+    monkeypatch.setattr("etcode_backend.backend_tools.get_search_provider", lambda s: Search())
     upstream.script = [FakeUpstream.tool_reply([("search_1", "websearch", {"query": "python"})]),
                        FakeUpstream.text_reply("found it")]
     sid = new_session(client, websearch=True)
     say(client, sid, "search")
+    wait_status(client, sid, "awaiting_tools")  # the client, not the worker, runs backend tools now
+    meta = client.get(f"/session/{sid}", headers=A).json
+    assert meta["pending_tool_calls"] == [
+        {"id": "search_1", "name": "websearch", "arguments": {"query": "python"}, "resolved": False, "backend": True}]
+    assert len(upstream.requests) == 1
+    result = run_backend_tool(client, sid, "search_1")
+    assert result.status_code == 200 and "Python" in result.json["content"][0]["text"]
+    assert result.json["duplicate"] is False
     wait_status(client, sid, "idle")
     hist = messages(client, sid)
     assert [m["message"]["role"] for m in hist] == ["system", "user", "assistant", "tool", "assistant"]
@@ -103,22 +115,50 @@ def test_websearch_only_auto_resumes(client, worker, upstream, monkeypatch):
     assert len(upstream.requests) == 2
 
 
-def test_mixed_websearch_waits_for_client(client, worker, upstream, monkeypatch):
+def test_backend_tools_wait_for_earlier_client_calls(client, worker, upstream, monkeypatch):
     class Search:
         def search(self, query):
             return [{"title": "Y", "url": "https://example.com", "description": "", "age": None}]
-    monkeypatch.setattr("etcode_backend.worker.get_search_provider", lambda s: Search())
-    upstream.script = [FakeUpstream.tool_reply([("search_1", "websearch", {"query": "python"}),
-                                                 ("read_1", "read_file", {"path": "x"})]),
+    monkeypatch.setattr("etcode_backend.backend_tools.get_search_provider", lambda s: Search())
+    upstream.script = [FakeUpstream.tool_reply([("read_1", "read_file", {"path": "x"}),
+                                                 ("search_1", "websearch", {"query": "python"})]),
                        FakeUpstream.text_reply("done")]
     sid = new_session(client, websearch=True)
     say(client, sid, "both")
     wait_status(client, sid, "awaiting_tools")
-    assert len(upstream.requests) == 1
+    # search_1 is second: the endpoint must refuse it until read_1 has a result
+    blocked = run_backend_tool(client, sid, "search_1")
+    assert blocked.status_code == 409 and blocked.json["error"]["code"] == "tool_call_not_ready"
+    assert run_backend_tool(client, sid, "read_1").status_code == 409  # client tool, wrong endpoint
     assert post_result(client, sid, "search_1", [{"type": "text", "text": "hijack"}]).status_code == 409
     assert post_result(client, sid, "read_1", [{"type": "text", "text": "file"}]).status_code == 202
+    result = run_backend_tool(client, sid, "search_1")
+    assert result.status_code == 200 and "example.com" in result.json["content"][0]["text"]
     wait_status(client, sid, "idle")
+    hist = messages(client, sid)
+    assert [m["message"]["tool_call_id"] for m in hist if m["message"]["role"] == "tool"] == ["read_1", "search_1"]
     assert len(upstream.requests) == 2
+
+
+def test_a_future_backend_tool_uses_the_same_endpoint_and_order(client, worker, upstream, monkeypatch):
+    """Registering a backend tool must be enough: clients need no new code for it."""
+    monkeypatch.setattr("etcode_backend.sessions.BACKEND_TOOLS", frozenset({"websearch", "clock"}))
+    monkeypatch.setattr("etcode_backend.sessions.execute_backend_tool",
+                        lambda name, arguments, **kw: f"{name}:{arguments['at']}")
+    monkeypatch.setattr("etcode_backend.worker.tool_names",
+                        lambda tools: {"bash", "read_file", "write_to_file", "replace_in_file", "websearch", "view_image", "clock"})
+    upstream.script = [FakeUpstream.tool_reply([("read_1", "read_file", {"path": "x"}), ("clock_1", "clock", {"at": "noon"})]),
+                       FakeUpstream.text_reply("done")]
+    sid = new_session(client)
+    say(client, sid, "both")
+    wait_status(client, sid, "awaiting_tools")
+    pending_calls = client.get(f"/session/{sid}", headers=A).json["pending_tool_calls"]
+    assert [(c["id"], c["backend"]) for c in pending_calls] == [("read_1", False), ("clock_1", True)]
+    assert run_backend_tool(client, sid, "clock_1").status_code == 409  # earlier call has no result yet
+    assert post_result(client, sid, "read_1", [{"type": "text", "text": "file"}]).status_code == 202
+    result = run_backend_tool(client, sid, "clock_1")
+    assert result.status_code == 200 and result.json["content"][0]["text"] == "clock:noon"
+    wait_status(client, sid, "idle")
 
 
 def test_cancel_during_stream(client, worker, upstream):

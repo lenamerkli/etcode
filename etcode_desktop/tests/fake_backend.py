@@ -44,6 +44,8 @@ MODELS = [
      "provider": "openrouter", "provider_tech_name": "fake/text", "openrouter_internal_provider": None},
 ]
 
+BACKEND_TOOL_NAMES = {"websearch"}  # tools this fake backend runs itself
+
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63600000"
     "02000001e221bc330000000049454e44ae426082")
@@ -386,7 +388,8 @@ class FakeBackend:
             }
             if not backend.legacy:
                 data["pending_tool_calls"] = [
-                    {"id": p["id"], "name": p["name"], "arguments": p["arguments"], "resolved": p.get("result") is not None}
+                    {"id": p["id"], "name": p["name"], "arguments": p["arguments"],
+                     "resolved": p.get("result") is not None, "backend": p["name"] in BACKEND_TOOL_NAMES}
                     for p in session.pending]
             if with_title:
                 data["title"] = session.title()
@@ -492,8 +495,8 @@ class FakeBackend:
                     call = next((p for p in session.pending if p["id"] == message.get("tool_call_id")), None)
                     if call is None:
                         raise ApiError(409, "unknown_tool_call", "Tool call is not awaiting a result")
-                    if call["name"] == "websearch":
-                        raise ApiError(409, "backend_tool", "websearch is executed by the backend")
+                    if call["name"] in BACKEND_TOOL_NAMES:
+                        raise ApiError(409, "backend_tool", f"{call['name']} is executed by the backend")
                     if call.get("result") is not None:
                         if call["result"] != message["content"]:
                             raise ApiError(409, "duplicate_tool_result", "Conflicting result for this tool call")
@@ -532,6 +535,36 @@ class FakeBackend:
         @app.post("/session/<sid>/messages")
         def many_messages(sid: str):
             return submit(sid, json_body())
+
+        @app.post("/session/<sid>/tool-calls/<call_id>/run")
+        def run_tool_call(sid: str, call_id: str):
+            with backend._state_lock:
+                session = session_of(sid)
+                call = next((p for p in session.pending if p["id"] == call_id), None)
+                if call is None:
+                    raise ApiError(409, "unknown_tool_call", "Tool call is not awaiting a result")
+                if call["name"] not in BACKEND_TOOL_NAMES:
+                    raise ApiError(409, "client_tool", f"{call['name']} is executed by the client")
+                if call.get("result") is not None:
+                    return jsonify({"tool_call_id": call_id, "content": call["result"], "duplicate": True,
+                                    "session": meta(session)}), 200
+                index = session.pending.index(call)
+                if any(p.get("result") is None for p in session.pending[:index]):
+                    raise ApiError(409, "tool_call_not_ready", "An earlier tool call has no result yet")
+                content = [{"type": "text", "text": call.get("search_result", "1. Example - https://example.com")}]
+                call["result"] = content
+                if all(p.get("result") is not None for p in session.pending):
+                    for pending in session.pending:
+                        session.messages.append({"role": "tool", "tool_call_id": pending["id"], "content": pending["result"]})
+                    session.pending = []
+                    session.status = "idle"
+                    touch(session)
+                    if backend.auto_reply:
+                        backend._maybe_reply(session)
+                else:
+                    touch(session)
+                return jsonify({"tool_call_id": call_id, "content": content, "duplicate": False,
+                                "session": meta(session)}), 200
 
         @app.post("/session/<sid>/cancel")
         def cancel(sid: str):
@@ -673,23 +706,25 @@ class FakeBackend:
             commit(message, "stop")
             finish("complete", "stop")
             return
-        session.pending = [{"id": c["id"], "name": c["name"], "arguments": c["arguments"]} for c in calls]
+        session.pending = [{"id": c["id"], "name": c["name"], "arguments": c["arguments"],
+                            "search_result": spec.search_result} for c in calls]
         for call in calls:
             gen.emit("tool_call", {"tool_call_id": call["id"], "name": call["name"], "arguments": call["arguments"]})
         commit(message, "tool_calls")
-        for pending in session.pending:  # the backend runs web searches itself
-            if pending["name"] == "websearch":
-                pending["result"] = [{"type": "text", "text": spec.search_result}]
-                gen.emit("tool_result", {"tool_call_id": pending["id"], "name": "websearch", "content": pending["result"]})
-        if all(p.get("result") is not None for p in session.pending):  # only searches: the backend goes on by itself
+        if self.legacy:  # the old backend runs web searches by itself
             for pending in session.pending:
-                session.messages.append({"role": "tool", "tool_call_id": pending["id"], "content": pending["result"]})
-            session.pending = []
-            session.status = "idle"
-            gen.retire()
-            nxt = self._maybe_reply(session)
-            gen.emit("done", {"status": "tool_calls", "finish_reason": "tool_calls", "next_generation_id": nxt.id if nxt else None})
-            return
+                if pending["name"] == "websearch":
+                    pending["result"] = [{"type": "text", "text": spec.search_result}]
+                    gen.emit("tool_result", {"tool_call_id": pending["id"], "name": "websearch", "content": pending["result"]})
+            if all(p.get("result") is not None for p in session.pending):
+                for pending in session.pending:
+                    session.messages.append({"role": "tool", "tool_call_id": pending["id"], "content": pending["result"]})
+                session.pending = []
+                session.status = "idle"
+                gen.retire()
+                nxt = self._maybe_reply(session)
+                gen.emit("done", {"status": "tool_calls", "finish_reason": "tool_calls", "next_generation_id": nxt.id if nxt else None})
+                return
         session.status = "awaiting_tools"
         touch_session(session)
         gen.emit("done", {"status": "tool_calls", "finish_reason": "tool_calls", "next_generation_id": None})

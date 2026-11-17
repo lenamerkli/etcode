@@ -1,7 +1,7 @@
 """execute_tool: the one entry point. It must always answer, whatever the call looks like."""
 import pytest
 
-from etcode_desktop.core.tools import ToolContext, execute_tool, path_key
+from etcode_desktop.core.tools import ToolContext, execute_tool
 from etcode_desktop.core import tools as tools_module
 
 
@@ -38,20 +38,3 @@ def test_results_are_always_non_empty_text_parts(tmp_path):
                             ("bash", {"command": "true", "directory": str(tmp_path)})):
         parts = run(tmp_path, name, arguments)
         assert parts and all(p["type"] == "text" and p["text"] for p in parts)
-
-
-def test_path_key_orders_calls_on_the_same_real_file(tmp_path):
-    real = tmp_path / "real.txt"
-    real.write_text("x")
-    (tmp_path / "link.txt").symlink_to(real)
-    keys = {path_key(n, {"path": p}, tmp_path) for n, p in (("read_file", "real.txt"), ("write_to_file", "./real.txt"),
-                                                           ("replace_in_file", str(real)), ("read_file", "link.txt"))}
-    assert len(keys) == 1
-    assert path_key("read_file", {"path": "other.txt"}, tmp_path) not in keys
-
-
-def test_path_key_is_none_for_calls_that_are_not_ordered(tmp_path):
-    assert path_key("bash", {"command": "ls"}, tmp_path) is None
-    assert path_key("view_image", {"path": "a.png"}, tmp_path) is None
-    assert path_key("read_file", {}, tmp_path) is None and path_key("read_file", {"path": 5}, tmp_path) is None
-    assert path_key("read_file", {"path": ""}, tmp_path) is None

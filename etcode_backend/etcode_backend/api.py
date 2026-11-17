@@ -16,7 +16,8 @@ from .db import connect, initialize, loads
 from .errors import APIError
 from .media import image_path, image_record, save_image
 from .schemas import ModelChange, SessionCreate, SubmitBatch
-from .sessions import cancel, change_model, create_session, list_sessions, owned_session, session_metadata, submit
+from .sessions import (cancel, change_model, create_session, list_sessions, owned_session, run_backend_tool,
+                       session_metadata, submit)
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 
@@ -169,6 +170,13 @@ def create_app(settings: Settings | None = None) -> Flask:
     @app.post("/session/<sid>/cancel")
     def cancel_generation(sid: str):
         return jsonify(cancel(g.db, sid, g.owner)), 202
+
+    @app.post("/session/<sid>/tool-calls/<call_id>/run")
+    def run_tool_call(sid: str, call_id: str):
+        """Run one backend-owned tool call (websearch, ...). The client calls this in model order."""
+        result = run_backend_tool(g.db, sid, g.owner, call_id, settings)
+        result["session"] = _metadata(result["session"])
+        return jsonify(result)
 
     @app.get("/session/<sid>/stream")
     def stream(sid: str):

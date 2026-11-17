@@ -1,14 +1,15 @@
-"""Run the tool calls of one assistant message in parallel, with a little order where it matters.
+"""Run the tool calls of one assistant message one after another, in the order the model gave them.
 
 * :class:`ToolPool` is a small thread pool of **daemon** threads (a ``ThreadPoolExecutor`` would make the
-  app wait for running tools when it quits).
-* :class:`ToolRunner` starts a batch of calls on the pool, all at once. Calls that work on the **same file**
-  (``read_file``, ``write_to_file``, ``replace_in_file``) run one after the other in the order the model
-  gave them, so that "write the file, then read it back" in one message works. Calls on different files, and
-  ``bash``, run side by side. ``bash`` is not analysed: what a command touches cannot be known.
-
-Waiting for an earlier call can't deadlock the pool: calls are queued in order, so the call that is waited
-for has always been started before the one that waits.
+  app wait for running tools when it quits). One submitted job is one whole tool round, so at most
+  ``max_workers`` sessions run tools at the same time.
+* :class:`ToolRunner` runs a batch serially on one pool thread. The next call starts only after the
+  previous call's ``work`` returned - which, in the controller, means after its result was journaled
+  and posted (or after the backend stored a backend-run tool's result). That is what makes
+  ``write_to_file`` followed by ``bash``/``read_file`` in one message safe.
+* If ``work`` raises, the remaining calls are not started. The controller retries from the journal,
+  which resends the failed result first and then continues with the calls that never ran.
+  ``stop`` (Stop/close) is checked before every call, so queued calls are skipped.
 """
 from __future__ import annotations
 
@@ -16,12 +17,12 @@ import logging
 import queue
 import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, wait
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import ToolContext, execute_tool, path_key
+from . import ToolContext, execute_tool
 from .cancel import CancelToken
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class BatchCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    backend: bool = False  # the backend runs this call; the client only asks it to
 
 
 class ToolRunner:
@@ -92,8 +94,6 @@ class ToolRunner:
         self.pool = pool or ToolPool()
         self.home = home or Path.home()
         self._execute = execute
-        self._lock = threading.RLock()  # a call that is over already runs its done-callback at once, inside submit_batch
-        self._tails: dict[str, Future] = {}
 
     def run(self, name: str, arguments: dict[str, Any], client: Any, cancel: CancelToken) -> list[dict[str, Any]]:
         """Run one call now, on this thread. Always returns content parts, even if the executor itself breaks."""
@@ -103,27 +103,44 @@ class ToolRunner:
             log.exception("running the tool %s failed", name)
             return [{"type": "text", "text": f"Error: the tool {name} failed: {type(exc).__name__}: {exc}"}]
 
-    def submit_batch(self, calls: Sequence[BatchCall], work: Callable[[BatchCall], None]) -> list[Future]:
-        """Start ``work(call)`` for every call on the pool, all at once, but in order for calls on the same file."""
-        futures: list[Future] = []
-        for call in calls:
-            key = path_key(call.name, call.arguments, self.home)
-            with self._lock:
-                previous = self._tails.get(key) if key is not None else None
-                future = self.pool.submit(self._ordered, call, work, previous)
-                if key is not None:
-                    self._tails[key] = future
-                    future.add_done_callback(lambda done, key=key: self._release(key, done))
-            futures.append(future)
+    def submit_batch(self, calls: Sequence[BatchCall], work: Callable[[BatchCall], Any],
+                     *, stop: Callable[[], bool] = lambda: False) -> list[Future]:
+        """Run ``work(call)`` for every call **one after another**, in the order given, on one pool thread.
+
+        One :class:`Future` per call is returned so that the controller can keep its ``_inflight``
+        bookkeeping. They complete in call order. If a call raises, that call's future carries the
+        exception, the remaining futures complete with ``None``, and no further call is started.
+        If ``work`` returns exactly ``False``, the rest of the batch is skipped as well (used when
+        another controller has claimed an earlier call: running a later one would break the order).
+        """
+        futures: list[Future] = [Future() for _ in calls]
+        if calls:
+            self.pool.submit(self._run_in_order, tuple(calls), tuple(futures), work, stop)
         return futures
 
     @staticmethod
-    def _ordered(call: BatchCall, work: Callable[[BatchCall], None], previous: Future | None) -> None:
-        if previous is not None:
-            wait([previous])  # its outcome does not matter here, only that it is over
-        work(call)
+    def _run_in_order(calls: Sequence[BatchCall], futures: Sequence[Future], work: Callable[[BatchCall], Any],
+                      stop: Callable[[], bool]) -> None:
+        for index, (call, future) in enumerate(zip(calls, futures)):
+            if stop():
+                _finish(future, None)
+                continue
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = work(call)
+                future.set_result(result)
+            except BaseException as exc:
+                future.set_exception(exc)
+                for rest in futures[index + 1:]:
+                    _finish(rest, None)
+                return
+            if result is False:  # an earlier call belongs to another controller: keep the order
+                for rest in futures[index + 1:]:
+                    _finish(rest, None)
+                return
 
-    def _release(self, key: str, future: Future) -> None:
-        with self._lock:
-            if self._tails.get(key) is future:
-                del self._tails[key]
+
+def _finish(future: Future, value: Any) -> None:
+    if not future.done():
+        future.set_result(value)

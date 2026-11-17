@@ -127,8 +127,18 @@ def test_pending_tool_calls_are_reported(fake, make_client):
     session.pending = [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}},
                        {"id": "c2", "name": "websearch", "arguments": {"query": "q"}, "result": [text_part("r")]}]
     meta = make_client(fake).get_session(session.id)
-    assert [(c.id, c.resolved) for c in meta.pending_tool_calls] == [("c1", False), ("c2", True)]
+    assert [(c.id, c.resolved, c.backend) for c in meta.pending_tool_calls] == [("c1", False, False), ("c2", True, True)]
     assert meta.pending_tool_calls[0].arguments == {"command": "ls"}
+
+
+def test_run_backend_tool_call(fake, make_client):
+    session = fake.add_session(websearch=True)
+    session.status = "awaiting_tools"
+    session.pending = [{"id": "w", "name": "websearch", "arguments": {"query": "q"}, "search_result": "1. result"}]
+    result = make_client(fake).run_tool_call(session.id, "w")
+    assert result.call_id == "w" and result.content == [text_part("1. result")]
+    assert result.duplicate is False and result.session.pending_tool_calls == ()
+    assert fake.requests[-1].raw_path == f"/session/{session.id}/tool-calls/w/run"
 
 
 # --- submit and cancel -------------------------------------------------------------------------------------

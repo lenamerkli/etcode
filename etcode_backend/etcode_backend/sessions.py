@@ -1,17 +1,27 @@
 """Durable session state machine and inbox."""
 from __future__ import annotations
 
+import logging
 import sqlite3
 import uuid
 from decimal import Decimal
 from typing import Any
 
+from .backend_tools import execute_backend_tool
 from .catalog import get_model
+from .config import Settings
 from .db import add_message, dumps, history, loads, now, transaction
 from .errors import APIError
 from .media import validate_content
 from .prompts import default_system_prompt
 from .schemas import SessionCreate, SubmitBatch
+from .tools import BACKEND_TOOLS
+
+log = logging.getLogger("etcode.sessions")
+
+# A backend tool claim older than this is considered abandoned (the API process died while
+# running it). The client is serial, so this only matters after a crash.
+BACKEND_TOOL_LEASE_SECONDS = 60.0
 
 
 def _uuid() -> str:
@@ -37,7 +47,8 @@ def pending_tool_calls(con: sqlite3.Connection, sid: str) -> list[dict]:
     content is not part of the metadata.
     """
     rows = con.execute("SELECT call_id,call_name,arguments,result FROM pending_tool_calls WHERE session_id=? ORDER BY call_order", (sid,))
-    return [{"id": r["call_id"], "name": r["call_name"], "arguments": loads(r["arguments"]), "resolved": r["result"] is not None}
+    return [{"id": r["call_id"], "name": r["call_name"], "arguments": loads(r["arguments"]),
+             "resolved": r["result"] is not None, "backend": r["call_name"] in BACKEND_TOOLS}
             for r in rows]
 
 
@@ -169,8 +180,8 @@ def submit(con: sqlite3.Connection, sid: str, owner: str, request: SubmitBatch) 
                 pending = con.execute("SELECT * FROM pending_tool_calls WHERE session_id=? AND call_id=?", (sid, msg.tool_call_id)).fetchone()
                 if pending is None:
                     raise APIError("unknown_tool_call", "Tool call is not awaiting a result", 409)
-                if pending["call_name"] == "websearch":
-                    raise APIError("backend_tool", "websearch is executed by the backend", 409)
+                if pending["call_name"] in BACKEND_TOOLS:
+                    raise APIError("backend_tool", f"{pending['call_name']} is executed by the backend", 409)
                 if pending["result"] is not None:
                     if loads(pending["result"])["content"] != body["content"]:
                         raise APIError("duplicate_tool_result", "Conflicting result for this tool call", 409)
@@ -196,6 +207,61 @@ def submit(con: sqlite3.Connection, sid: str, owner: str, request: SubmitBatch) 
                         response["queued"] = False
         return {"accepted": responses, "generation_id": gid,
                 "session": session_metadata(con, owned_session(con, sid, owner))}
+
+
+def run_backend_tool(con: sqlite3.Connection, sid: str, owner: str, call_id: str, settings: Settings) -> dict:
+    """Run one backend-owned tool call, in order, and return its content and session metadata.
+
+    The client calls this only for the first unresolved call of a round, but the order check
+    is enforced here as well: a backend tool may not run while an earlier call has no result.
+    The call is claimed first, so a duplicate request cannot execute it twice. Calling it
+    again after it is done returns the stored result as a duplicate.
+    """
+    with transaction(con):
+        row = owned_session(con, sid, owner)
+        pending = con.execute("SELECT * FROM pending_tool_calls WHERE session_id=? AND call_id=?", (sid, call_id)).fetchone()
+        if pending is None:
+            raise APIError("unknown_tool_call", "Tool call is not awaiting a result", 409)
+        if pending["call_name"] not in BACKEND_TOOLS:
+            raise APIError("client_tool", f"{pending['call_name']} is executed by the client", 409)
+        if pending["result"] is not None:
+            body = loads(pending["result"])
+            return {"tool_call_id": call_id, "content": body["content"], "duplicate": True,
+                    "generation_id": None, "session": session_metadata(con, row)}
+        running_at = pending["running_at"] or 0.0
+        if pending["running"] and running_at > now() - BACKEND_TOOL_LEASE_SECONDS:
+            raise APIError("tool_call_running", "This tool call is already running", 409)
+        earlier = con.execute("SELECT 1 FROM pending_tool_calls WHERE session_id=? AND call_order<? AND result IS NULL LIMIT 1",
+                              (sid, pending["call_order"])).fetchone()
+        if earlier is not None:
+            raise APIError("tool_call_not_ready", "An earlier tool call has no result yet", 409)
+        con.execute("UPDATE pending_tool_calls SET running=1,running_at=? WHERE session_id=? AND call_id=?",
+                    (now(), sid, call_id))
+        call_name = pending["call_name"]
+        arguments = loads(pending["arguments"])
+        websearch_enabled = bool(row["websearch"])
+
+    try:
+        result = execute_backend_tool(call_name, arguments, websearch_enabled=websearch_enabled, settings=settings)
+    except Exception as exc:  # noqa: BLE001 - a tool failure is a result, not a stuck barrier
+        log.exception("the backend tool %s failed", call_name)
+        result = f"Error: the backend tool {call_name} failed: {type(exc).__name__}: {exc}"
+    content = result if isinstance(result, list) else [{"type": "text", "text": str(result)}]
+
+    with transaction(con):
+        current = con.execute("SELECT result FROM pending_tool_calls WHERE session_id=? AND call_id=?", (sid, call_id)).fetchone()
+        if current is None:  # cancelled while the tool ran
+            raise APIError("unknown_tool_call", "Tool call was cancelled", 409)
+        duplicate = current["result"] is not None
+        if duplicate:
+            content = loads(current["result"])["content"]
+        else:
+            body = {"role": "tool", "tool_call_id": call_id, "content": content}
+            con.execute("UPDATE pending_tool_calls SET result=?,running=0,running_at=NULL WHERE session_id=? AND call_id=?",
+                        (dumps(body), sid, call_id))
+        gid = _advance(con, sid)
+        return {"tool_call_id": call_id, "content": content, "duplicate": duplicate,
+                "generation_id": gid, "session": session_metadata(con, owned_session(con, sid, owner))}
 
 
 CANCELLED_TOOL_TEXT = "Tool call was cancelled before a result was received."

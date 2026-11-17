@@ -11,6 +11,7 @@ from etcode_desktop.core.session_state import (  # noqa: E402
 )
 from etcode_desktop.core.sse import Backoff  # noqa: E402
 from etcode_desktop.core.store import Scope, SessionStore  # noqa: E402
+from etcode_desktop.core.tools.scheduler import ToolPool, ToolRunner  # noqa: E402
 from fake_backend import Reply, StreamFault  # noqa: E402
 
 FAST_BACKOFF = Backoff(initial=0.01, factor=1.5, maximum=0.05, give_up_after=5.0)
@@ -428,7 +429,7 @@ def test_stop_gives_up_on_tool_calls_and_shows_their_cancelled_results(harness, 
 
 
 def test_a_web_search_that_the_backend_runs_continues_by_itself(harness, fake):
-    h = harness()
+    h = harness(tools=ToolRunner(ToolPool(2)))
     fake.replies.extend([Reply(text="Searching.", start_delay=0.15, tool_calls=[("w1", "websearch", {"query": "python"})], search_result="1. Python.org"),
                          Reply(text="Python is a language.")])
     h.send("what is python?")
@@ -438,16 +439,16 @@ def test_a_web_search_that_the_backend_runs_continues_by_itself(harness, fake):
     first = entries[1]
     assert first.tool_calls[0].name == "websearch" and first.tool_calls[0].result[0]["text"] == "1. Python.org"
     assert entries[2].text == "Python is a language."
-    assert h.of(c.LiveToolResult) and NOTICE_TOOLS not in h.state.notices
+    assert h.of(c.ToolFinished) and not h.of(c.LiveToolResult) and NOTICE_TOOLS not in h.state.notices
     assert [e.index for e in entries] == [1, 2, 4]  # index 3 is the tool message, which is not shown
 
 
-def test_with_a_web_search_and_another_tool_only_the_other_one_is_pending(harness, fake):
+def test_without_a_runner_every_unresolved_call_is_reported(harness, fake):
     h = harness()
     fake.replies.append(Reply(tool_calls=[("w1", "websearch", {"query": "q"}), ("c1", "bash", {"command": "ls"})]))
     h.send("both")
     assert h.wait(lambda: NOTICE_TOOLS in h.state.notices)
-    assert [p.id for p in h.of(c.ToolsPending)[0].calls] == ["c1"]
+    assert [p.id for p in h.of(c.ToolsPending)[0].calls] == ["w1", "c1"]
 
 
 # --- connection trouble ----------------------------------------------------------------------------------------------------------------------

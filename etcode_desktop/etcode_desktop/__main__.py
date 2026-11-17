@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from . import __version__
 from .config import ConfigStore, KEY_TOKEN, KEY_URL
 from .core.store import SessionStore, StoreError
-from .core.tools.scheduler import ToolPool, ToolRunner
+from .core.tools.scheduler import ToolRunner
 from .logging_setup import configure_logging, install_excepthook, register_secret
 from .paths import Paths
 
@@ -93,7 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             log.info("forgot %d old tool calls from the journal", pruned)
     except Exception:
         log.exception("could not prune the tool journal")
-    tools = ToolRunner(ToolPool(settings.max_parallel_tools))
+    # Tool calls of one round now run one at a time; the pool only bounds concurrent sessions.
+    # ``max_parallel_tools`` is deprecated and ignored.
+    tools = ToolRunner()
     bridge = BackendBridge(store, settings)
     config = ConfigStore(paths)
     pictures = ImageLoader(paths.data_dir / "images", lambda: bridge.client)

@@ -170,8 +170,8 @@ def test_no_pending_calls_for_a_new_session(client):
 def test_pending_calls_through_a_whole_tool_round(client, worker, upstream):
     sid = start_tool_round(client, upstream, [("call_a", "bash", {"command": "pwd"}), ("call_b", "read_file", {"path": "x", "start_line": 3})])
     assert pending(client, sid) == [
-        {"id": "call_a", "name": "bash", "arguments": {"command": "pwd"}, "resolved": False},
-        {"id": "call_b", "name": "read_file", "arguments": {"path": "x", "start_line": 3}, "resolved": False},
+        {"id": "call_a", "name": "bash", "arguments": {"command": "pwd"}, "resolved": False, "backend": False},
+        {"id": "call_b", "name": "read_file", "arguments": {"path": "x", "start_line": 3}, "resolved": False, "backend": False},
     ]
     # a result arriving first (out of order) marks only that call as resolved
     response = post_result(client, sid, "call_b", "contents")
@@ -204,15 +204,11 @@ def test_a_repeated_result_does_not_change_the_list(client, worker, upstream):
     assert pending(client, sid) == before
 
 
-def test_websearch_calls_are_listed_and_already_resolved(client, worker, upstream, monkeypatch):
-    class Search:
-        def search(self, query):
-            return [{"title": "Y", "url": "https://example.com", "description": "", "age": None}]
-    monkeypatch.setattr("etcode_backend.worker.get_search_provider", lambda s: Search())
+def test_websearch_calls_are_listed_as_backend_calls(client, worker, upstream):
     sid = start_tool_round(client, upstream, [("search_1", "websearch", {"query": "python"}), ("read_1", "read_file", {"path": "x"})],
                            websearch=True)
-    assert [(c["id"], c["name"], c["resolved"]) for c in pending(client, sid)] == [
-        ("search_1", "websearch", True), ("read_1", "read_file", False)]
+    assert [(c["id"], c["name"], c["resolved"], c["backend"]) for c in pending(client, sid)] == [
+        ("search_1", "websearch", False, True), ("read_1", "read_file", False, False)]
 
 
 def test_cancelling_the_tool_calls_clears_the_list(client, worker, upstream):

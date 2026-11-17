@@ -16,14 +16,12 @@ from .config import Settings
 from .db import connect, dumps, emit, history, initialize, loads, now, transaction, add_message, record_generation_cost, fmt_cost
 from .errors import ProviderError
 from .providers import Cancelled, CancelToken, get_provider
-from .search import SearchQuery, get_search_provider
-from .sessions import _advance, resolve_pending_as_cancelled
-from .tools import BACKEND_TOOLS, tools_for, tool_names
+from .sessions import BACKEND_TOOL_LEASE_SECONDS, _advance, resolve_pending_as_cancelled
+from .tools import tools_for, tool_names
 
 log = logging.getLogger("etcode.worker")
 CANCEL_NOTICE = "\n\n[Generation cancelled by user]"
 FLUSH_INTERVAL = 0.05
-MAX_SEARCH_RESULT_CHARS = 100_000
 
 
 class Worker:
@@ -81,6 +79,9 @@ class Worker:
                 self.submit(row["id"], recovering=True)
         con.execute("DELETE FROM events WHERE generation_id IN (SELECT id FROM generations WHERE status NOT IN ('queued','running') AND updated_at<?)",
                     (now() - self.settings.event_retention_seconds,))
+        # A backend-tool claim whose process died would otherwise block the next attempt.
+        con.execute("UPDATE pending_tool_calls SET running=0,running_at=NULL WHERE running=1 AND running_at<?",
+                    (now() - BACKEND_TOOL_LEASE_SECONDS,))
 
     # -- one generation -------------------------------------------------
     def _guarded(self, gid: str, recovering: bool) -> None:
@@ -112,7 +113,9 @@ class Worker:
                 self._finish(con, gid, "error", {"code": "interrupted", "message": "Generation was interrupted by a backend restart", "retryable": True})
                 return
             if recovering:
-                self.tool_phase(con, gid, sid, session["websearch"], cancel)
+                # The generation had already finished; its tool calls are still pending.
+                # The client resumes them in model order, including backend-owned ones.
+                self._finish(con, gid, "complete", None, finish_reason="tool_calls")
                 return
             if gen["cancel_requested"]:
                 cancel.cancel()
@@ -215,10 +218,9 @@ class Worker:
             for call in calls:
                 emit(con, gid, "tool_call", {"tool_call_id": call["id"], "name": call["name"], "arguments": call["arguments"]})
             emit(con, gid, "message_complete", {"index": idx, "finish_reason": finish_reason, "message": message})
-        if calls:
-            self.tool_phase(con, gid, sid, session["websearch"], cancel, finish_reason=finish_reason)
-        else:
-            self._finish(con, gid, "complete", None, finish_reason=finish_reason)
+        # All calls, including backend-owned ones, are reported to the client and run by it
+        # in model order. The session stays ``awaiting_tools`` until every result has arrived.
+        self._finish(con, gid, "complete", None, finish_reason=finish_reason)
 
     @staticmethod
     def _normalize_call(raw: dict, existing: list[dict]) -> dict:
@@ -250,42 +252,9 @@ class Worker:
                                   "source": "provider" if usage and usage.get("cost") is not None and cost is not None else "catalog" if cost is not None else "unknown",
                                   "usage": usage})
 
-    # -- backend tools --------------------------------------------------
-    def tool_phase(self, con, gid, sid, websearch_enabled, cancel: CancelToken, finish_reason: str = "tool_calls") -> None:
-        """Run backend-executed tools (websearch), then complete the generation."""
-        rows = con.execute("SELECT * FROM pending_tool_calls WHERE session_id=? AND result IS NULL ORDER BY call_order", (sid,)).fetchall()
-        for row in rows:
-            if row["call_name"] not in BACKEND_TOOLS:
-                continue
-            if cancel.cancelled:
-                self._finish(con, gid, "cancelled", None, tool_cancel=True)
-                return
-            result = self._run_search(row, bool(websearch_enabled))
-            body = {"role": "tool", "tool_call_id": row["call_id"], "content": [{"type": "text", "text": result}]}
-            with transaction(con):
-                con.execute("UPDATE pending_tool_calls SET result=? WHERE session_id=? AND call_id=?", (dumps(body), sid, row["call_id"]))
-                emit(con, gid, "tool_result", {"tool_call_id": row["call_id"], "name": row["call_name"], "content": body["content"]})
-        if cancel.cancelled:
-            self._finish(con, gid, "cancelled", None, tool_cancel=True)
-            return
-        self._finish(con, gid, "complete", None, finish_reason=finish_reason)
-
-    def _run_search(self, row, enabled: bool) -> str:
-        if not enabled:
-            return "Error: websearch is not enabled for this session."
-        try:
-            query = SearchQuery.model_validate(loads(row["arguments"]))
-            results = get_search_provider(self.settings).search(query)
-            text = json.dumps(results, ensure_ascii=False, indent=1)
-            return text[:MAX_SEARCH_RESULT_CHARS]
-        except Exception as exc:  # noqa: BLE001 - reported to the model as a tool result
-            log.warning("websearch failed: %s", exc)
-            detail = str(exc) if exc.__class__.__name__ in ("ValidationError", "RuntimeError") else type(exc).__name__
-            return f"Error: web search failed ({detail[:500]})"
-
     # -- completion -----------------------------------------------------
     def _finish(self, con, gid, status: str, error: dict | None, partial: dict | None = None,
-                finish_reason: str | None = None, tool_cancel: bool = False,
+                finish_reason: str | None = None,
                 usage: dict | None = None, model=None, billable: bool = False) -> None:
         """Atomically record the outcome, advance the session and emit the closing events."""
         with transaction(con):
@@ -301,8 +270,6 @@ class Worker:
                     emit(con, gid, "message_complete", {"index": idx, "finish_reason": "cancelled", "message": partial})
                 else:
                     emit(con, gid, "message_complete", {"index": idx, "finish_reason": "error", "message": partial})
-            if tool_cancel:
-                resolve_pending_as_cancelled(con, sid)
             if status == "cancelled":
                 emit(con, gid, "cancelled", {"index": idx if partial is not None else None})
             elif status == "error":

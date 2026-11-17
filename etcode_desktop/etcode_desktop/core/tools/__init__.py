@@ -7,7 +7,6 @@ result for every call: a bad call, a failing command or a bug in a tool all beco
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -81,12 +80,3 @@ def _run(name: str, args: dict[str, Any], given: dict[str, Any], context: ToolCo
             raise FileToolError("images cannot be uploaded: there is no connection to the backend")
         return view_image(args["path"], home, context.client)
     raise ToolArgumentError(f"unknown tool '{name}'")  # unreachable: validate_arguments knows the names
-
-
-def path_key(name: str, arguments: dict[str, Any], home: Path) -> str | None:
-    """What calls are ordered by: the real path that a file tool works on (None for other tools)."""
-    if name in ("read_file", "write_to_file", "replace_in_file"):
-        path = arguments.get("path")
-        if isinstance(path, str) and path:
-            return os.path.realpath(resolve_path(path, home))
-    return None

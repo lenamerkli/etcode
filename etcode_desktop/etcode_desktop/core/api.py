@@ -33,7 +33,8 @@ from .errors import (
     AuthError, BackendError, Conflict, NotFound, ProtocolError, ServerError, Unreachable, Unsupported,
 )
 from .models import (
-    DownloadedImage, HistoryEntry, ModelInfo, SessionList, SessionMeta, SubmitResult, UploadedImage,
+    BackendToolResult, DownloadedImage, HistoryEntry, ModelInfo, SessionList, SessionMeta, SubmitResult,
+    UploadedImage,
 )
 
 log = logging.getLogger(__name__)
@@ -347,6 +348,15 @@ class BackendClient:
         only_tool_results = bool(messages) and all(m.get("role") == "tool" for m in messages)
         response = self._call("POST", f"/session/{self._sid(session_id)}/messages", json=body, retry=only_tool_results)
         return SubmitResult.from_dict(self._json(response))
+
+    def run_tool_call(self, session_id: str, call_id: str) -> BackendToolResult:
+        """Ask the backend to run one of its own tool calls (websearch, ...) and return the result.
+
+        Retried on network trouble: the backend returns the stored result as a duplicate if the
+        first request was executed but its answer was lost.
+        """
+        path = f"/session/{self._sid(session_id)}/tool-calls/{quote(call_id, safe='')}/run"
+        return BackendToolResult.from_dict(self._json(self._call("POST", path, retry=True)))
 
     def cancel(self, session_id: str) -> dict[str, Any]:
         """Cancel the running generation, or abandon outstanding tool calls.

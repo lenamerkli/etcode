@@ -18,11 +18,13 @@ guessing from events: a queued message or a backend-run web search starts anothe
 Tool calls
 ----------
 When the model asks for tools, the session waits (``awaiting_tools``) until every call has a result. If the
-controller has a :class:`~etcode_desktop.core.tools.scheduler.ToolRunner`, it runs the calls that the client is
-responsible for (not ``websearch``, which the backend runs) side by side, and posts each result as soon as it is
-there. For each call the journal in the local store says what was done, so that a restart never runs a command
-twice: a result that was not posted yet is posted again, and a call that was running when the app died is
-answered with a note instead of being run again (a shell command is not safe to repeat).
+controller has a :class:`~etcode_desktop.core.tools.scheduler.ToolRunner`, it runs the calls **one at a time,
+in the order the model gave them**. Client tools run in the VM; backend-owned tools (``websearch`` and future
+ones) are executed by the backend through ``POST /session/<id>/tool-calls/<call_id>/run``. A call starts only
+after the previous result was journaled and accepted, so a mixed round is still in model order. For each client
+call the journal in the local store says what was done, so that a restart never runs a command twice: a result
+that was not posted yet is posted again, and a call that was running when the app died is answered with a note
+instead of being run again (a shell command is not safe to repeat).
 
 Without a runner, the calls are only reported with :class:`ToolsPending`, and ``stop()`` cancels them.
 """
@@ -61,6 +63,8 @@ VERIFY_GRACE_SECONDS = 3.0  # a message whose outcome is unknown may still be on
 VERIFY_ATTEMPTS = 20  # tries to reach the backend for that
 
 RETRY_DELAYS = (3.0, 5.0, 10.0, 20.0, 30.0)  # waits between attempts after the connection was lost for good
+BACKEND_CALL_READY_DELAY = 0.25  # a backend tool may still be claimed/running by another request
+BACKEND_CALL_READY_TIMEOUT = 30.0  # give up and let the follower retry after this long
 POLL_DELAYS = (0.3, 1.0, 2.0)  # waits while the backend says "generating" but has no stream for us yet
 HISTORY_TAIL_LIMIT = 1000  # what GET /session/<id>/last/<n> allows
 
@@ -613,7 +617,9 @@ class SessionController:
     def _calls_to_run(self, meta: SessionMeta) -> list[PendingToolCall]:
         """The calls that wait for a result from this client, in the order of the model."""
         if meta.pending_tool_calls is not None:
-            return list(meta.unresolved_client_calls())
+            # A backend that does not report ``backend`` (an older one) still runs websearch
+            # itself; keep leaving that call to it. New backends flag every call.
+            return [c for c in meta.unresolved_calls() if c.backend is not None or c.name != "websearch"]
         # An older backend does not say which calls wait. The stream and the history say which calls were made,
         # and the journal says which of them we have answered.
         calls = []
@@ -633,7 +639,7 @@ class SessionController:
             self._stop_finished.wait(STOP_WAIT_SECONDS)
             return not self._closed.is_set()
         if not calls:
-            self._wait(self._poll_delays[-1])  # only the backend's own web search is left: it resumes by itself
+            self._wait(self._poll_delays[0])  # every result is in; the backend may be starting the next generation
             return not self._closed.is_set()
         round_ids = tuple(call.id for call in calls)
         if round_ids == self._last_round:
@@ -644,7 +650,7 @@ class SessionController:
         return not self._closed.is_set()
 
     def _execute_calls(self, calls: Sequence[PendingToolCall]) -> None:
-        """Start the calls side by side and wait until each of them is posted (or stopped)."""
+        """Run the calls one after another and wait until each result is stored (or stopped)."""
         assert self._tools is not None
         from .tools.scheduler import BatchCall
         token = self._cancel
@@ -654,11 +660,15 @@ class SessionController:
             plan = self._plan(call)
             if plan is not None:
                 plans[call.id] = plan
-                batch.append(BatchCall(call.id, call.name, call.arguments))
+                batch.append(BatchCall(call.id, call.name, call.arguments, backend=bool(call.backend)))
         if not batch:
             self._wait(self._poll_delays[0])
             return
-        futures = self._tools.submit_batch(batch, lambda call: self._run_call(call, plans[call.id], token))
+        futures = self._tools.submit_batch(
+            batch,
+            lambda call: self._run_call(call, plans[call.id], token),
+            stop=lambda: token.cancelled,
+        )
         with self._lock:
             for call, future in zip(batch, futures):
                 self._inflight[call.id] = future
@@ -685,6 +695,8 @@ class SessionController:
         with self._lock:
             if call.id in self._inflight:
                 return None  # it is being run
+        if call.backend:
+            return "backend", None  # the backend stores its own result; no local journal
         entry = self._store.journal_get(self._scope, self.session_id, call.id)
         if entry is None:
             return "start", None
@@ -692,16 +704,24 @@ class SessionController:
             return "resend", entry
         return "interrupted", entry  # 'running' in the journal, but not in this process: the app died while it ran
 
-    def _run_call(self, call: BatchCall, plan: tuple[str, JournalEntry | None], token: CancelToken) -> None:
-        """The whole life of one call, on a pool thread: run (or recall), journal, tell the view, post."""
+    def _run_call(self, call: BatchCall, plan: tuple[str, JournalEntry | None], token: CancelToken) -> bool | None:
+        """The whole life of one call, on a pool thread: run (or recall), journal, tell the view, post.
+
+        Returns exactly ``False`` when another controller owns an earlier call, so that the
+        caller stops the rest of the batch and leaves the order intact.
+        """
         assert self._tools is not None
+        if token.cancelled:
+            return None  # Stop arrived before this call started: the backend resolves it
         kind, entry = plan
+        if kind == "backend":
+            return self._run_backend_call(call, token)
         started = time.monotonic()
         duration: float | None = None
         if kind == "start":
             try:
                 if not self._store.journal_start(self._scope, self.session_id, call.id, call.name, call.arguments):
-                    return  # somebody else has taken it
+                    return False  # somebody else has taken it: stop, so no later call overtakes it
             except (sqlite3.Error, StoreError, OSError) as exc:
                 # Without the journal a crash could make the command run twice. So it is not run. The model is told,
                 # which also keeps the session from waiting for a result that never comes.
@@ -726,6 +746,42 @@ class SessionController:
             return  # Stop: the backend resolves this call itself, and a result now could only start another generation
         self._post_result(call.id, content)
         self._journal(self._store.journal_posted, call.id)
+        return None
+
+    def _run_backend_call(self, call: BatchCall, token: CancelToken) -> bool | None:
+        """Ask the backend to run one of its own tools, and wait until its result is stored.
+
+        The backend stores the result itself, so this call does not post anything. It is
+        still part of the serial order: the next call starts only after this returns.
+        """
+        if token.cancelled:
+            return None
+        started = time.monotonic()
+        self._emit(ToolStarted(call.id))
+        deadline = started + BACKEND_CALL_READY_TIMEOUT
+        result = None
+        while True:
+            if token.cancelled:
+                return None
+            try:
+                result = self._client.run_tool_call(self.session_id, call.id)
+                break
+            except Conflict as exc:
+                if exc.code == "unknown_tool_call":
+                    return False  # cancelled, or resolved by another controller: do not overtake it
+                if exc.code in ("tool_call_not_ready", "tool_call_running"):
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"the backend tool call {call.id} did not become ready: {exc}")
+                    if token.wait(BACKEND_CALL_READY_DELAY):
+                        return None
+                    continue
+                raise
+        if self._closed.is_set():
+            return None
+        duration = None if result.duplicate else time.monotonic() - started
+        self._emit(ToolFinished(call.id, result.content, duration))
+        self._publish_meta(result.session)
+        return None
 
     def _journal(self, write: Callable[..., None], call_id: str, *args: Any) -> None:
         """A journal entry after the fact. If it cannot be written, the call has still been done: say so in the log, go on."""

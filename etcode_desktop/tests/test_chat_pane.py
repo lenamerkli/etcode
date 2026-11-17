@@ -185,7 +185,9 @@ def test_tool_calls_are_shown_as_cards_and_stop_cancels_them(env, qapp, fake):
 def test_a_web_search_card_gets_its_result(env, qapp, fake):
     fake.replies.extend([Reply(text="Searching.", start_delay=0.1, tool_calls=[("w1", "websearch", {"query": "python docs"})],
                                search_result="1. docs.python.org"), Reply(text="Here is what I found.")])
-    window, pane, session, store, bridge = open_session(env, qapp, fake)
+    # Backend tools are now run on request, so the window needs a tool runner even though
+    # no local tool executes.
+    window, pane, session, store, bridge = open_with_tools(env, qapp, fake, SlowStub())
     type_and_send(pane, "find python docs")
     assert wait_until(qapp, lambda: settled(pane, fake, session), 10)
     assistant_blocks = [b for b in blocks(pane) if type(b).__name__ == "AssistantBlock"]

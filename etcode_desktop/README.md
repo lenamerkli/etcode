@@ -75,14 +75,16 @@ confirmation step: the VM is the sandbox, and the user `agent` has passwordless 
 | `replace_in_file` | Replaces **every** occurrence of a text in a file and reports where each one was. |
 | `view_image` | Uploads a PNG, JPEG or WebP image so that the model can see it. |
 
-`websearch` is run by the backend, not here. The exact result formats are in [PLAN.md](PLAN.md) (section 5.5).
+`websearch` is run by the backend, not in the VM: the client asks the backend to execute it through
+`POST /session/<id>/tool-calls/<call_id>/run`. The exact result formats are in [PLAN.md](PLAN.md) (section 5.5).
 Relative paths are relative to the home directory. `~` is the home directory.
 
-* **In parallel.** The calls of one message run side by side (at most `max_parallel_tools`, 8 by default),
-  and each result is sent as soon as it is ready. Calls that work on the **same file** run in the order
-  the model gave them, so "write, then read it back" in one message works. `bash` calls are not ordered
-  against anything: what a command touches cannot be known, so a model that runs dependent commands in
-  parallel can get surprising results. The system prompt tells it to batch only independent calls.
+* **One at a time, in model order.** The calls of one message run strictly one after another, in the
+  order the model gave them. Client tools run in the VM; backend-owned tools (`websearch` and future
+  ones) run on the backend through the tool-call endpoint. A call starts only after the previous
+  result was journaled and accepted. So "write the file, run a command on it, then read it back" in
+  one message works exactly as written. The model may still emit several independent calls in one
+  response; only their execution is serialized.
 * **Stop** ends running commands at once, with everything they started (SIGTERM, then SIGKILL), and
   cancels the calls at the backend. A stopped call sends no result.
 * **A timeout** ends the command and everything it started and reports the output so far. A background
@@ -159,7 +161,7 @@ Each key is resolved separately, highest priority first:
 | 3 | `/etc/etcode/desktop.json` | provisioned by the manager, read only (`ETCODE_PROVISIONED_FILE` overrides the path) |
 | 4 | defaults | `http://10.0.2.2:8765` (the host, seen from a QEMU VM), no token |
 
-Keys: `backend_url`, `token`, `max_parallel_tools` (1-64, default 8), and `vm_id` (stable UUID).
+Keys: `backend_url`, `token`, `vm_id` (stable UUID), and `max_parallel_tools` (deprecated: accepted and validated, but ignored; calls always run one at a time).
 The manager provisions `vm_id` from the VM UUID. Outside a managed VM, the app creates and persists
 one in its user config. Token rotation does not change this local identity.
 

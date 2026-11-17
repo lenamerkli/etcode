@@ -55,6 +55,7 @@ Errors look like `{"error": {"code": "...", "message": "..."}}`.
 | `GET /session/<id>/last/<n>` | Last n messages (n ≤ 1000) with absolute indexes. |
 | `GET /session/<id>/stream` | SSE for the active generation, or 204 if there is none. |
 | `POST /session/<id>/cancel` | Cancels the running generation. If none is running, abandons outstanding tool calls. Returns 409 when there is nothing to cancel. |
+| `POST /session/<id>/tool-calls/<call_id>/run` | Runs one backend-owned tool call (`websearch`, ...) and returns `{"tool_call_id", "content", "duplicate", "session"}`. Refuses a call while an earlier call is unresolved (`409 tool_call_not_ready`), a client tool (`409 client_tool`), and an unknown/resolved call (`409 unknown_tool_call`); a repeat of a stored result returns it as a duplicate. |
 | `POST /media/images` | Multipart field `file` (PNG/JPEG/WebP/GIF) returns `{"hash", "media_type", "mime_type"}`. |
 | `GET /media/images/<hash>` | Download an image that the same token uploaded. |
 
@@ -77,14 +78,18 @@ history after the current turn (including any tool-call chain) finishes.
 
 When the model calls tools, the session goes to `awaiting_tools`. The session metadata
 then lists the calls that still block it in `pending_tool_calls`:
-`[{"id", "name", "arguments", "resolved"}]` in call order. `resolved` is true when a result has
-been stored (by the client, or by the backend for `websearch`) but other calls are still missing.
-The result itself is not included, and the list is empty when nothing is pending. A client that
-restarts can use it to see which calls it still has to run. Run the client
-tools and post one `tool` message per call. You can post them in any order. They
-are added to the history in call order once all of them have arrived, and then
-generation resumes. `websearch` runs in the backend, so do not answer it. If
-websearch was the only tool called, generation resumes on its own.
+`[{"id", "name", "arguments", "resolved", "backend"}]` in call order. `resolved` is true when a
+result has been stored but other calls are still missing. `backend` is true for tools the backend
+executes itself (`websearch` and future ones). The result itself is not included, and the list is
+empty when nothing is pending.
+
+Clients run **every** call one at a time, in this order. A client tool is run locally and its
+result is posted with one `tool` message. A backend tool is run by calling
+`POST /session/<id>/tool-calls/<call_id>/run`; the backend stores the result and returns it.
+The endpoint enforces the order: it refuses a call while an earlier call has no result
+(`409 tool_call_not_ready`), refuses a client tool (`409 client_tool`), and returns the stored
+result as a duplicate on a repeat. Results are added to the history in call order once all of
+them have arrived, and then generation resumes. Do not post a `tool` message for a backend tool.
 
 For `view_image`, upload the image first and return
 `{"type": "image", "hash": ...}` in the tool result. Neither provider accepts
@@ -114,13 +119,14 @@ Per-generation `usage` and `cost` are stored in the `generations` table.
 
 `id: <generation_id>:<sequence>`. Every payload includes `generation_id` and
 `sequence`. Events: `reasoning_delta {text}`, `text_delta {text}`,
-`tool_call {tool_call_id, name, arguments}`, `tool_result` (backend websearch),
+`tool_call {tool_call_id, name, arguments}`,
 `usage {cost, currency, session_cost_total, source, usage}` (`source` is `provider`, `catalog` or `unknown`),
 `message_complete {index, finish_reason, message}`, `error {code, message, retryable}`,
 `cancelled {index}`, `done {status, finish_reason, next_generation_id}`.
-On connect the backend replays the generation from the start. You can send
-`Last-Event-ID` to resume from a later point instead. If `done` has a
-`next_generation_id` (after websearch or a queued message), connect again to
+Backend-tool results are returned by `POST /session/<id>/tool-calls/<call_id>/run`,
+not streamed as events. On connect the backend replays the generation from the start.
+You can send `Last-Event-ID` to resume from a later point instead. If `done` has a
+`next_generation_id` (after a backend tool or a queued message), connect again to
 follow it.
 
 ## Behaviour notes

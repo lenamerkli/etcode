@@ -74,6 +74,10 @@ MIGRATIONS = [
     ("generations", "usage", "TEXT"),
     ("generations", "cost", "TEXT"),
     ("generations", "cost_recorded", "INTEGER NOT NULL DEFAULT 0"),
+    # Backend tools are claimed by one request while they run, so a duplicate request
+    # cannot execute them twice. ``running_at`` makes a stale claim recoverable.
+    ("pending_tool_calls", "running", "INTEGER NOT NULL DEFAULT 0"),
+    ("pending_tool_calls", "running_at", "REAL"),
 ]
 
 

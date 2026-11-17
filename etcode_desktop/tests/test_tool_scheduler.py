@@ -97,58 +97,28 @@ def test_a_pool_of_zero_still_has_one_worker():
 
 # --- a batch ------------------------------------------------------------------------------------------------------------------------
 
-def test_all_calls_of_a_batch_start_together():
+def test_calls_of_a_batch_run_one_after_another_in_order():
     runner = ToolRunner(ToolPool(8))
-    gate = threading.Event()
-    recorder = Recorder(gate=gate)
-    futures = runner.submit_batch([call(f"c{i}") for i in range(5)], recorder)
-    deadline = time.monotonic() + 3
-    while recorder.running < 5 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert recorder.running == 5, "the calls did not run side by side"
-    gate.set()
-    for f in futures:
-        f.result(5)
+    recorder = Recorder()
+    run_batch(runner, [call(f"c{i}") for i in range(5)], recorder)
+    assert recorder.order("start") == ["c0", "c1", "c2", "c3", "c4"]
+    assert recorder.order("end") == ["c0", "c1", "c2", "c3", "c4"]
+    assert recorder.peak == 1
 
 
-def test_calls_on_the_same_file_run_in_the_order_given():
+def test_every_kind_of_call_takes_its_turn():
     runner = ToolRunner(ToolPool(8), home=None)
-    recorder = Recorder(pause=0.1)
-    calls = [call("w", "write_to_file", path="/tmp/same.txt"), call("r", "read_file", path="/tmp/same.txt"),
-             call("e", "replace_in_file", path="/tmp/same.txt"), call("r2", "read_file", path="/tmp/same.txt")]
+    recorder = Recorder(pause=0.05)
+    calls = [call("w", "write_to_file", path="/tmp/same.txt"), call("b", "bash", command="cat /tmp/same.txt"),
+             call("r", "read_file", path="/tmp/same.txt"), call("v", "view_image", path="/tmp/same.txt"),
+             call("b2", "bash", command="echo done")]
     run_batch(runner, calls, recorder)
-    assert recorder.order("start") == ["w", "r", "e", "r2"]
-    assert recorder.order("end") == ["w", "r", "e", "r2"]
-    assert recorder.peak == 1  # one after the other
+    assert recorder.order("start") == ["w", "b", "r", "v", "b2"]
+    assert recorder.order("end") == ["w", "b", "r", "v", "b2"]
+    assert recorder.peak == 1
 
 
-def test_calls_on_different_files_run_side_by_side():
-    runner = ToolRunner(ToolPool(8))
-    recorder = Recorder(pause=0.2)
-    run_batch(runner, [call("a", "read_file", path="/tmp/one.txt"), call("b", "write_to_file", path="/tmp/two.txt"),
-                       call("c", "replace_in_file", path="/tmp/three.txt")], recorder)
-    assert recorder.peak == 3
-
-
-def test_bash_and_view_image_are_not_ordered():
-    runner = ToolRunner(ToolPool(8))
-    recorder = Recorder(pause=0.2)
-    run_batch(runner, [call("w", "write_to_file", path="/tmp/f.txt"), call("b", "bash", command="cat /tmp/f.txt"),
-                       call("v", "view_image", path="/tmp/f.txt"), call("b2", "bash", command="x")], recorder)
-    assert recorder.peak == 4
-
-
-def test_ordering_works_across_batches_too():
-    runner = ToolRunner(ToolPool(8))
-    recorder = Recorder(pause=0.15)
-    first = runner.submit_batch([call("first", "write_to_file", path="/tmp/shared.txt")], recorder)
-    second = runner.submit_batch([call("second", "read_file", path="/tmp/shared.txt")], recorder)
-    for f in first + second:
-        f.result(5)
-    assert recorder.order("end") == ["first", "second"] and recorder.peak == 1
-
-
-def test_a_failing_call_does_not_stop_the_calls_after_it_on_the_same_file():
+def test_a_failing_call_stops_the_calls_after_it():
     runner = ToolRunner(ToolPool(4))
     done = []
 
@@ -161,25 +131,44 @@ def test_a_failing_call_does_not_stop_the_calls_after_it_on_the_same_file():
                                    call("other", "bash", command="x")], work)
     with pytest.raises(RuntimeError):
         futures[0].result(5)
-    futures[1].result(5)
-    futures[2].result(5)
-    assert sorted(done) == ["good", "other"]
+    assert futures[1].result(5) is None and futures[2].result(5) is None
+    assert done == []
 
 
-def test_a_batch_larger_than_the_pool_still_finishes_in_order_per_file():
+def test_a_batch_larger_than_the_pool_still_finishes_in_order():
     runner = ToolRunner(ToolPool(2))
     recorder = Recorder(pause=0.02)
     calls = [call(f"f{i}", "write_to_file", path="/tmp/chain.txt") for i in range(6)] + [call(f"b{i}") for i in range(6)]
     run_batch(runner, calls, recorder)  # must not deadlock
-    assert [i for i in recorder.order("start") if i.startswith("f")] == [f"f{i}" for i in range(6)]
-    assert recorder.peak <= 2
+    assert recorder.order("start") == [f"f{i}" for i in range(6)] + [f"b{i}" for i in range(6)]
+    assert recorder.peak == 1
 
 
-def test_the_chain_bookkeeping_is_cleaned_up():
-    runner = ToolRunner(ToolPool(4))
-    run_batch(runner, [call("a", "read_file", path="/tmp/y.txt"), call("b", "read_file", path="/tmp/y.txt")], Recorder())
-    time.sleep(0.05)
-    assert runner._tails == {}
+def test_a_work_function_that_returns_false_stops_the_rest_of_the_batch():
+    runner = ToolRunner(ToolPool(2))
+    seen = []
+
+    def work(c):
+        seen.append(c.id)
+        return False
+
+    futures = runner.submit_batch([call("c1"), call("c2"), call("c3")], work)
+    assert futures[0].result(5) is False and futures[1].result(5) is None and futures[2].result(5) is None
+    assert seen == ["c1"]
+
+
+def test_stop_skips_the_rest_of_the_batch():
+    runner = ToolRunner(ToolPool(2))
+    seen = []
+    stopped = threading.Event()
+    def work(c):
+        seen.append(c.id)
+        stopped.set()
+
+    futures = runner.submit_batch([call("c1"), call("c2")], work, stop=stopped.is_set)
+    assert futures[0].result(5) is None
+    assert futures[1].result(5) is None
+    assert seen == ["c1"]
 
 
 # --- run -----------------------------------------------------------------------------------------------------------------------------

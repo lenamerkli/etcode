@@ -16,7 +16,8 @@ Read the relevant skill before starting a task it covers.
 # Tools
 - Use the provided tools to inspect and change the system instead of guessing. \
 Read a file before editing it, and prefer `replace_in_file` for edits.
-- If several tool calls do not depend on each other, issue them in the same response.
+- If several tool calls do not depend on each other, issue them in the same response. \
+  Tool calls in one response run in the order you give them, one at a time.
 - Verify your work (e.g. run tests or the program) when it is practical.
 
 # Communication

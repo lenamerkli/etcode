@@ -36,7 +36,7 @@ MAX_PARALLEL_TOOLS_LIMIT = 64
 
 KEY_URL = "backend_url"
 KEY_TOKEN = "token"
-KEY_PARALLEL = "max_parallel_tools"
+KEY_PARALLEL = "max_parallel_tools"  # deprecated: accepted and validated, but tool calls now run one at a time
 KEY_VM_ID = "vm_id"
 
 ENV_URL = "ETCODE_BACKEND_URL"
@@ -131,6 +131,8 @@ def token_fingerprint(token: str) -> str:
 class Settings:
     backend_url: str
     token: str = field(default="", repr=False)  # "" means: no token configured
+    # Deprecated. Kept so that old config files and the manager still validate; it no longer
+    # controls how many calls of one tool round run at once (they always run serially).
     max_parallel_tools: int = DEFAULT_MAX_PARALLEL_TOOLS
     vm_id: str = ""
     # key -> where the value came from (SOURCE_*). For display only.
@@ -276,6 +278,8 @@ class ConfigStore:
             except OSError as exc:
                 log.warning("could not persist local VM identity: %s", exc)
         values[KEY_VM_ID], sources[KEY_VM_ID] = vm_id, vm_source
+        if sources.get(KEY_PARALLEL, SOURCE_DEFAULT) != SOURCE_DEFAULT:
+            log.info("max_parallel_tools is deprecated and ignored: tool calls now run one at a time")
         return Settings(
             backend_url=values[KEY_URL],
             token=values[KEY_TOKEN] or "",

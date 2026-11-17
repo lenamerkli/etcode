@@ -34,6 +34,16 @@ def test_unresolved_client_calls_skip_websearch_and_resolved_ones():
     assert [c.id for c in SessionMeta.from_dict(SESSION).unresolved_client_calls()] == ["c1"]
 
 
+def test_unresolved_calls_keep_client_and_backend_calls_in_model_order():
+    meta = SessionMeta.from_dict({**SESSION, "pending_tool_calls": [
+        {"id": "c1", "name": "bash", "arguments": {"command": "ls"}, "resolved": False, "backend": False},
+        {"id": "c2", "name": "websearch", "arguments": {"query": "x"}, "resolved": False, "backend": True},
+        {"id": "c3", "name": "read_file", "arguments": {"path": "a"}, "resolved": True, "backend": False},
+    ]})
+    assert [c.id for c in meta.unresolved_calls()] == ["c1", "c2"]
+    assert [c.id for c in meta.unresolved_client_calls()] == ["c1"]
+
+
 def test_missing_pending_tool_calls_means_unknown_not_empty():
     old = {k: v for k, v in SESSION.items() if k != "pending_tool_calls"}
     assert SessionMeta.from_dict(old).pending_tool_calls is None

@@ -1,4 +1,4 @@
-"""The controller runs the tool calls of the model: in parallel, journaled, posted as they finish, safe to restart."""
+"""The controller runs the tool calls of the model: one at a time in model order, journaled, safe to restart."""
 import os
 import threading
 import time
@@ -121,9 +121,9 @@ def test_several_rounds_in_a_row(make, fake):
     assert {e.call_id for e in h.of(c.ToolFinished)} == {"a1", "b1", "b2"}
 
 
-# --- parallel -------------------------------------------------------------------------------------------------------------------------
+# --- one after another --------------------------------------------------------------------------------------------------------------
 
-def test_calls_run_side_by_side_and_are_posted_as_they_finish(make, fake):
+def test_calls_run_one_after_another_and_are_posted_in_order(make, fake):
     stub = Stub()
     h = make(execute=stub)
     fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[call("c1", tag="slow", sleep=0.8), call("c2", tag="fast", sleep=0.1),
@@ -131,24 +131,23 @@ def test_calls_run_side_by_side_and_are_posted_as_they_finish(make, fake):
     started = time.monotonic()
     h.send("three things")
     settle(h)
-    assert time.monotonic() - started < 2.5, "the calls ran one after the other"
-    assert stub.peak == 3 and stub.finished == ["fast", "middle", "slow"]
-    assert posts_of_tool_results(fake) == ["c2", "c3", "c1"]  # in the order they finished
-    assert [m["tool_call_id"] for m in tool_messages(h.session)] == ["c1", "c2", "c3"]  # the history is in call order
+    assert time.monotonic() - started >= 1.3, "the calls did not run one after the other"
+    assert stub.peak == 1 and stub.finished == ["slow", "fast", "middle"]
+    assert posts_of_tool_results(fake) == ["c1", "c2", "c3"]  # in model order, not completion order
+    assert [m["tool_call_id"] for m in tool_messages(h.session)] == ["c1", "c2", "c3"]
     assert h.texts()[-1] == ("assistant", "done")
 
 
-def test_the_cards_show_each_call_on_its_own(make, fake):
+def test_only_one_card_is_running_at_a_time(make, fake):
     h = make(execute=Stub())
-    fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[call("c1", tag="slow", sleep=2.5), call("c2", tag="fast")]), Reply(text="done")])
+    fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[call("c1", tag="slow", sleep=0.6), call("c2", tag="fast", sleep=0.6)]), Reply(text="done")])
     h.send("go")
     def find_call(call_id):
         return next((t for e in h.state.model.entries() if e.role == "assistant" for t in e.tool_calls if t.id == call_id), None)
 
-    assert h.wait(lambda: find_call("c2") is not None and find_call("c2").result and find_call("c1") is not None and find_call("c1").running)
-    entry = next(e for e in h.state.model.entries() if e.role == "assistant")
-    states = {t.id: (t.running, t.result is not None) for t in entry.tool_calls}
-    assert states == {"c1": (True, False), "c2": (False, True)}  # one is still running while the other is done
+    assert h.wait(lambda: find_call("c1") is not None and find_call("c1").running and find_call("c2") is not None
+                  and not find_call("c2").running and find_call("c2").result is None)
+    assert h.wait(lambda: find_call("c1").result is not None and find_call("c2").running)
     settle(h)
 
 
@@ -157,6 +156,7 @@ def test_a_write_and_a_read_of_the_same_file_in_one_message_are_in_order(make, f
     path = tmp_path / "notes.txt"
     fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[
         call("w", "write_to_file", path=str(path), content="first line\n"),
+        call("b", "bash", command=f"cat {path}", directory=str(tmp_path)),
         call("r", "read_file", path=str(path)),
         call("e", "replace_in_file", path=str(path), search="first", replace="second"),
         call("r2", "read_file", path=str(path)),
@@ -165,25 +165,26 @@ def test_a_write_and_a_read_of_the_same_file_in_one_message_are_in_order(make, f
     settle(h)
     results = {m["tool_call_id"]: m["content"][0]["text"] for m in tool_messages(h.session)}
     assert results["w"] == f"Wrote 11 characters to {path}"
-    assert "<content>first line\n</content>" in results["r"]  # the read saw what the write wrote
+    assert "first line" in results["b"]  # bash saw what the write wrote
+    assert "<content>first line\n</content>" in results["r"]
     assert "Made 1 replacement(s)" in results["e"]
     assert "<content>second line\n</content>" in results["r2"]
     assert "unrelated" in results["other"]
 
 
-def test_the_pool_limits_how_many_calls_run_at_once(make, fake):
+def test_a_message_runs_one_call_at_a_time_even_with_a_larger_pool(make, fake):
     stub = Stub()
-    h = make(execute=stub, pool_size=2)
+    h = make(execute=stub, pool_size=4)
     fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[call(f"c{i}", tag=str(i), sleep=0.2) for i in range(6)]), Reply(text="done")])
     h.send("many")
     settle(h)
-    assert stub.peak == 2 and len(stub.calls) == 6
-    assert h.runner.pool.thread_count == 2
+    assert stub.peak == 1 and len(stub.calls) == 6
+    assert stub.finished == [str(i) for i in range(6)]
 
 
 # --- mixed with web search and bad calls --------------------------------------------------------------------------------------------
 
-def test_the_backends_web_search_is_left_to_the_backend(make, fake, tmp_path):
+def test_a_backend_web_search_is_run_by_the_backend_in_order(make, fake, tmp_path):
     stub = Stub()
     h = make(execute=stub)
     fake.replies.extend([Reply(text="x", start_delay=0.1, tool_calls=[call("w", "websearch", query="python"), call("b", tag="bash-call")],
@@ -260,7 +261,7 @@ def test_stop_ends_running_commands_and_the_session_goes_idle(make, fake, tmp_pa
     fake.replies.append(Reply(text="x", start_delay=0.1, tool_calls=[call("c1", command=f"sleep 60 & echo $! > {pid_file}; sleep 60", directory=str(tmp_path)),
                                                                       call("c2", command="sleep 60", directory=str(tmp_path))]))
     h.send("run long things")
-    assert h.wait(lambda: len(h.of(c.ToolStarted)) == 2 and pid_file.exists())
+    assert h.wait(lambda: len(h.of(c.ToolStarted)) == 1 and pid_file.exists())
     started = time.monotonic()
     h.controller.stop()
     h.wait_idle(15)
@@ -275,6 +276,22 @@ def test_stop_ends_running_commands_and_the_session_goes_idle(make, fake, tmp_pa
     entry = next(e for e in h.state.model.entries() if e.role == "assistant" and e.tool_calls)
     assert all(t.result and not t.running for t in entry.tool_calls)
     assert not h.controller.is_following
+
+
+def test_stop_while_calls_are_queued_does_not_start_them(make, fake, tmp_path):
+    h = make()
+    fake.replies.append(Reply(text="x", start_delay=0.1, tool_calls=[
+        call("c1", command="sleep 60", directory=str(tmp_path)),
+        call("c2", command="sleep 60", directory=str(tmp_path)),
+        call("c3", command="sleep 60", directory=str(tmp_path))]))
+    h.send("run long things")
+    assert h.wait(lambda: len(h.of(c.ToolStarted)) == 1)
+    h.controller.stop()
+    h.wait_idle(15)
+    assert [e.call_id for e in h.of(c.ToolStarted)] == ["c1"]  # the queued calls never started
+    assert not posts_of_tool_results(fake)
+    results = {m["tool_call_id"]: m["content"][0]["text"] for m in tool_messages(h.session)}
+    assert all("cancelled" in text.lower() for text in results.values())
 
 
 def test_stop_then_a_new_message_works(make, fake, tmp_path):
@@ -383,7 +400,7 @@ def test_a_posted_call_that_is_still_unresolved_is_posted_again(make, fake):
     assert stub.calls == [] and tool_messages(session)[0]["content"][0]["text"] == "posted before, but the backend lost it"
 
 
-def test_after_a_restart_each_call_gets_the_right_treatment_side_by_side(make, fake):
+def test_after_a_restart_each_call_gets_the_right_treatment_in_order(make, fake):
     stub = Stub()
     session = awaiting_session(fake, [call("c1", tag="1"), call("c2", tag="2"), call("c3", tag="3"), call("c4", tag="4")])
     h = make(session, execute=stub)
@@ -396,6 +413,7 @@ def test_after_a_restart_each_call_gets_the_right_treatment_side_by_side(make, f
     assert stub.calls == [("bash", "3")]  # only the call that was never started
     results = {m["tool_call_id"]: m["content"][0]["text"] for m in tool_messages(session)}
     assert results["c1"] == "kept 1" and results["c3"] == "ran bash 3" and results["c4"] == "kept 4"
+    assert [m["tool_call_id"] for m in tool_messages(session)] == ["c1", "c2", "c3", "c4"]
     assert results["c2"].startswith("Error: the desktop client was interrupted")
 
 

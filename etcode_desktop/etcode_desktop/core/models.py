@@ -93,6 +93,9 @@ class PendingToolCall:
     name: str
     arguments: dict[str, Any]
     resolved: bool  # a result was accepted, but the session is still waiting for the other calls
+    # True: executed by the backend (websearch, ...). False: executed by this client.
+    # None: an older backend that does not report it; such a backend still runs websearch itself.
+    backend: bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PendingToolCall:
@@ -103,6 +106,7 @@ class PendingToolCall:
             name=str(_require(data, "name", "pending tool call")),
             arguments=arguments if isinstance(arguments, dict) else {},
             resolved=bool(data.get("resolved", False)),
+            backend=None if data.get("backend") is None else bool(data["backend"]),
         )
 
 
@@ -147,9 +151,17 @@ class SessionMeta:
             pending_tool_calls=None if pending is None else tuple(PendingToolCall.from_dict(p) for p in pending),
         )
 
+    def unresolved_calls(self) -> tuple[PendingToolCall, ...]:
+        """Every unresolved call of the round, in model order (client and backend tools alike)."""
+        return tuple(c for c in (self.pending_tool_calls or ()) if not c.resolved)
+
     def unresolved_client_calls(self) -> tuple[PendingToolCall, ...]:
-        """The calls this client has to execute. ``websearch`` is run by the backend."""
-        return tuple(c for c in (self.pending_tool_calls or ()) if not c.resolved and c.name != "websearch")
+        """The unresolved calls this client has to execute itself.
+
+        Kept for callers of older clients and for a backend that does not report ``backend``:
+        ``websearch`` is the one backend tool that older backends run by themselves.
+        """
+        return tuple(c for c in self.unresolved_calls() if not c.backend and c.name != "websearch")
 
 
 @dataclass(frozen=True)
@@ -235,6 +247,28 @@ class SubmitResult:
             accepted=tuple(a for a in accepted if isinstance(a, dict)),
             generation_id=data.get("generation_id") or None,
             session=SessionMeta.from_dict(_require(data, "session", "submit response")),
+        )
+
+
+@dataclass(frozen=True)
+class BackendToolResult:
+    """The result of a call that the backend executed itself (websearch, ...)."""
+    call_id: str
+    content: list[dict[str, Any]]
+    session: SessionMeta
+    duplicate: bool = False  # the backend had already stored this result and returned it again
+
+    @classmethod
+    def from_dict(cls, data: Any) -> BackendToolResult:
+        data = _as_dict(data, "backend tool result")
+        content = data.get("content")
+        if not isinstance(content, list):
+            raise ProtocolError("a backend tool result has no 'content' list")
+        return cls(
+            call_id=str(_require(data, "tool_call_id", "backend tool result")),
+            content=[part for part in content if isinstance(part, dict)],
+            session=SessionMeta.from_dict(_require(data, "session", "backend tool result")),
+            duplicate=bool(data.get("duplicate", False)),
         )
 
 

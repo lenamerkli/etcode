@@ -226,13 +226,13 @@ def test_tool_calls_survive_reopening_the_session(real, harness, make_client):
     again.controller.close()
 
 
-def test_a_web_search_run_by_the_backend_continues_by_itself(real, harness, monkeypatch):
+def test_a_backend_web_search_runs_through_the_client_in_order(real, harness, monkeypatch):
     class Search:
         def search(self, query):
             return [{"title": "Python", "url": "https://python.org", "description": "A language", "age": None}]
-    monkeypatch.setattr("etcode_backend.worker.get_search_provider", lambda settings: Search())
+    monkeypatch.setattr("etcode_backend.backend_tools.get_search_provider", lambda settings: Search())
     real.upstream.script = [Upstream.tools([("search_1", "websearch", {"query": "python"})]), Upstream.text("Python is a language.")]
-    h = harness(websearch=True)
+    h = harness(tools=ToolRunner(ToolPool(2)), websearch=True)
     h.send("what is python")
     h.wait_settled()
     entries = h.state.model.entries()
@@ -298,7 +298,7 @@ def test_a_command_runs_and_the_model_gets_exactly_its_result(real, harness, tmp
 import json  # noqa: E402
 
 
-def test_calls_run_in_parallel_and_files_in_order_with_the_real_backend(real, harness, tmp_path):
+def test_calls_run_in_model_order_with_the_real_backend(real, harness, tmp_path):
     path = tmp_path / "data.txt"
     real.upstream.script = [Upstream.tools([
         ("w", "write_to_file", {"path": str(path), "content": "alpha\n"}),
@@ -310,7 +310,7 @@ def test_calls_run_in_parallel_and_files_in_order_with_the_real_backend(real, ha
     started = time.monotonic()
     h.send("go")
     h.wait_settled(20)
-    assert time.monotonic() - started < 2.4, "the three sleeps did not run side by side"
+    assert time.monotonic() - started >= 2.1, "the three sleeps ran side by side instead of one after another"
     results = tool_message_texts(h)
     assert "<content>alpha\n</content>" in results["r"] and results["w"] == f"Wrote 6 characters to {path}"
     assert [e.message["tool_call_id"] for e in h.client.messages(h.session.id) if e.message["role"] == "tool"] == ["w", "r", "s1", "s2", "s3"]
