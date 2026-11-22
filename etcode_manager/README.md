@@ -1,8 +1,8 @@
 # etcode-manager
 
 A desktop app that manages the VMs in which etcode agents perform tasks.
-It runs on **Windows, Fedora and Debian** and drives QEMU directly — the
-guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
+It runs on **Windows, Fedora and Debian** and drives QEMU directly. The viewer
+needs **no guest-side remote-desktop server** such as xrdp or VNC.
 
 ## Features (MVP)
 
@@ -19,6 +19,12 @@ guest needs **no extra software** (no freeRDP/xrdp/VNC server inside the VM).
   new VM gets the backend URL and access token through its cloud-init seed (see below).
 * **Mouse and keyboard input** — clicks, wheel and keys are forwarded to
   the guest (X11 keysym translation included).
+
+For agent-driven Firefox or game testing, the guest desktop app also has an
+[`interactive_gui` tool](data/skills/interactive_gui.md). It operates on the existing Xfce desktop,
+so the manager's viewer can show the same window. Stop the chat's agent run before taking over.
+To include the tool in a rebuilt base image, build with a fresh `IMAGE_VERSION` and point `base_image`
+at the new template; don't replace a base image that existing VM overlays depend on.
 
 ## Requirements
 

@@ -71,6 +71,8 @@ GUEST_PACKAGES=(
     xorg lightdm lightdm-gtk-greeter xfce4 xfce4-whiskermenu-plugin
     # keeps the display on (used by provision/etcode-no-blank.desktop)
     x11-xserver-utils
+    # Window listing, input and screenshots for the guest desktop tool
+    wmctrl xdotool x11-utils imagemagick
     # quick launch: firefox, thunar, terminal (vscodium comes from its own
     # apt repository and is installed in provision.sh)
     firefox-esr thunar xfce4-terminal

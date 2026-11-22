@@ -10,7 +10,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "etcode_backend"
 
 
 def test_the_client_tools_are_known():
-    assert TOOL_NAMES == {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "save_messages", "view_image"}
+    assert TOOL_NAMES == {"bash", "interactive_gui", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "save_messages", "view_image"}
     assert "websearch" not in TOOL_NAMES  # the backend runs it
 
 

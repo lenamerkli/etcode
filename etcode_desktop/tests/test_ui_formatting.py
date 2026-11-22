@@ -77,6 +77,7 @@ def test_truncate():
     ("write_to_file", {"path": "a.py", "content": "..."}, "a.py"),
     ("replace_in_file", {"path": "b.py", "search": "x", "replace": "y"}, "b.py"),
     ("view_image", {"path": "shot.png"}, "shot.png"),
+    ("interactive_gui", {"window_id": "0x00600007", "action": "hold", "key": "w"}, "hold 0x00600007"),
     ("websearch", {"query": "python docs", "count": 3}, "python docs"),
     ("something_new", {"alpha": 1, "beta": 2}, "alpha=1"),
     ("bash", {}, ""),

@@ -97,6 +97,8 @@ def tool_summary(name: str, arguments: dict) -> str:
     """A short line that says what a tool call does: the command, the path, the query."""
     if "_invalid_arguments" in arguments:
         return "(arguments are not valid JSON)"
+    if name == "interactive_gui":
+        return truncate(f"{arguments.get('action', '')} {arguments.get('window_id', '')}".strip(), SUMMARY_LENGTH)
     key = {"bash": "command", "read_file": "path", "write_to_file": "path", "replace_in_file": "path",
            "view_image": "path", "websearch": "query"}.get(name)
     if key is not None and isinstance(arguments.get(key), str):

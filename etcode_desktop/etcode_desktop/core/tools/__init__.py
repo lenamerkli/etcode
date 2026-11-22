@@ -17,6 +17,7 @@ from .bash import run_bash
 from .cancel import CancelToken
 from .files import FileToolError, read_file, replace_in_file, resolve_path, write_to_file
 from .image import view_image
+from .interactive_gui import run_gui
 from .interactive_terminal import TerminalManager
 from .save_messages import export_messages
 from .schemas import TOOL_NAMES, ToolArgumentError, explicit, validate_arguments
@@ -28,7 +29,7 @@ __all__ = ["CancelToken", "ToolContext", "execute_tool", "TOOL_NAMES", "error_te
 
 @dataclass
 class ToolContext:
-    client: BackendClient | None = None  # used by view_image and save_messages
+    client: BackendClient | None = None  # for image uploads and history export
     cancel: CancelToken = field(default_factory=CancelToken)
     home: Path = field(default_factory=Path.home)  # relative paths are relative to this
     terminal_manager: TerminalManager | None = None
@@ -73,6 +74,8 @@ def _run(name: str, args: dict[str, Any], given: dict[str, Any], context: ToolCo
             from .bash import format_result
             return [text_part(format_result(-1, f"cannot start the command: the directory {args['directory']} does not exist", ""))]
         return [text_part(run_bash(args["command"], args["timeout"], directory, venv, args["max_chars"], context.cancel))]
+    if name == "interactive_gui":
+        return run_gui(args, context.cancel, context.client)
     if name == "interactive_terminal":
         manager = context.terminal_manager
         if manager is None:

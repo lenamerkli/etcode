@@ -71,6 +71,7 @@ and the user `agent` has passwordless sudo anyway).
 | --- | --- |
 | `bash` | Runs `bash -c <command>` in a directory, with a timeout (60 s by default). The result is the return code, stderr and stdout, cut to `max_chars`. |
 | `interactive_terminal` | Keeps a PTY shell by terminal ID within one chat so the model can interact with TUIs using `type`, `press`, `wait` and `print` actions. A terminal ID cannot be reused after the desktop app exits; the local store remembers cleaned-up IDs and returns an error if one is requested again. |
+| `interactive_gui` | Lists `wmctrl -l` window IDs on the guest’s X11 desktop, takes client-area screenshots, and sends mouse and keyboard input, including bounded key holds and relative mouse movement. Offered to image-capable models. |
 | `read_file` | Reads part of a text file: from the later of `start_line` and `start_char`, up to the first of `end_line`, `end_char` and `max_chars`. The result says what was read and how much was left out. |
 | `write_to_file` | Writes a whole file (atomically, keeping its mode) and creates missing directories. |
 | `replace_in_file` | Replaces **every** occurrence of a text in a file and reports where each one was. |
@@ -104,6 +105,12 @@ Relative paths are relative to the home directory. `~` is the home directory.
   because the session waits for a result for every call.
 * The command does not get the app's `ETCODE_API_TOKEN`. But it runs as the same user, so it can read the
   token file. Use a token that is dedicated to etcode VMs.
+
+### GUI windows
+
+Launch the app in the guest, then ask the agent to list windows with `interactive_gui`. It targets the returned hex window IDs, not chat sessions. Screenshots are uploaded to the same backend as `view_image`. The agent works on the same Xfce desktop you see in the manager viewer: press **Stop** in chat before taking over, then continue in the app without relaunching it. The tool releases held keys on Stop or focus loss. It does not automatically arbitrate human and agent input.
+
+Update the backend and guest desktop app together. New images install `wmctrl`, `xdotool`, `x11-utils`, and `imagemagick`; install those packages when updating an existing guest. See the [guest skill](../etcode_manager/data/skills/interactive_gui.md) for action examples and Fabric testing notes.
 
 ### Exporting chat history
 

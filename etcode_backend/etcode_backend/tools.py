@@ -164,6 +164,42 @@ VIEWIMAGE_TOOL: dict[str, Any] = {
     },
 }
 
+INTERACTIVE_GUI_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "interactive_gui",
+        "description": (
+            "Inspect and control windows on the VM desktop by their wmctrl -l IDs. Launch apps with bash. "
+            "List windows first, then capture screenshots or send input. See /home/agent/skills/interactive_gui.md."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_windows", "screenshot", "click", "scroll", "type", "press", "hold", "move_relative"],
+                    "description": "The action to perform. Only list_windows does not need a window_id.",
+                },
+                "window_id": {"type": "string", "description": "Hex ID from list_windows (wmctrl -l)."},
+                "x": {"type": "integer", "description": "Click x in client-area pixels, from the top left of the screenshot."},
+                "y": {"type": "integer", "description": "Click y in client-area pixels, from the top left of the screenshot."},
+                "button": {"type": "integer", "description": "Click button: 1 left, 2 middle, 3 right.", "default": 1},
+                "ticks": {"type": "integer", "description": "Scroll wheel ticks: negative up, positive down (1 to 10 in either direction)."},
+                "text": {"type": "string", "description": "Literal text to type, up to 256 characters."},
+                "key": {"type": "string", "description": "X11 key name or chord, e.g. w, Escape, or ctrl+l."},
+                "duration_ms": {"type": "integer", "description": "Duration of a hold (1 to 2000 milliseconds)."},
+                "dx": {"type": "integer", "description": "Horizontal mouse delta (-500 to 500)."},
+                "dy": {"type": "integer", "description": "Vertical mouse delta (-500 to 500)."},
+                "steps": {
+                    "type": "integer", "default": 1,
+                    "description": "Repeat the relative delta this many times, at 50 ms intervals (1 to 20).",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 # Tools whose implementation lives on the backend. The client runs every call of a
 # round in model order and asks the backend to execute these through
 # POST /session/<id>/tool-calls/<call_id>/run. Add a tool here and to
@@ -176,7 +212,7 @@ def tools_for(websearch: bool, supports_images: bool) -> list[dict[str, Any]]:
     if websearch:
         tools.append(copy.deepcopy(WEBSEARCH_TOOL))
     if supports_images:
-        tools.append(copy.deepcopy(VIEWIMAGE_TOOL))
+        tools.extend(copy.deepcopy([VIEWIMAGE_TOOL, INTERACTIVE_GUI_TOOL]))
     return tools
 
 
