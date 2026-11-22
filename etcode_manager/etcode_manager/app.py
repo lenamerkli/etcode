@@ -26,7 +26,7 @@ class NewVMDialog(QDialog):
     """Collects name, resources and the backend settings for a new VM.
 
     The backend URL and token are what the etcode desktop app inside the VM will use. They are prefilled with the
-    defaults from ``config.json`` and can be changed per VM (for example to give one VM its own token).
+    defaults from ``config.local.json`` and can be changed per VM (for example to give one VM its own token).
     """
 
     def __init__(self, parent=None, backend_url: str = DEFAULT_BACKEND_URL, backend_token: str = ""):
@@ -129,7 +129,7 @@ class SettingsDialog(QDialog):
     """Edits the defaults that apply to every VM created from now on, and the screen scaling default.
 
     The backend token is the same secret that each VM receives (in its ``vm.json`` and cloud-init seed). It is
-    shown masked by default. Saving writes ``config.json`` privately, because that file now holds the token.
+    shown masked by default. Saving writes ``config.local.json`` privately, because that file now holds the token.
     """
 
     def __init__(
@@ -164,7 +164,8 @@ class SettingsDialog(QDialog):
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setPlaceholderText("none: each VM's app asks for one")
         self.token_edit.setToolTip(
-            "The access token that new VMs use. It is stored in config.json (private to you) and copied into "
+            "The access token that new VMs use. It is stored in config.local.json (git-ignored, private to "
+            "you) and copied into "
             "each new VM's vm.json and seed.iso, where the model can read it. Use a token that is only for "
             "etcode VMs."
         )
@@ -435,7 +436,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def on_settings(self) -> None:
-        """Edit the defaults for future VMs and the screen filter; persist them to config.json."""
+        """Edit the defaults for future VMs and the screen filter; persist them to config.local.json."""
         dialog = SettingsDialog(
             self,
             backend_url=self.settings.backend_url,

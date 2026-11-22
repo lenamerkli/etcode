@@ -4,13 +4,18 @@ The manager keeps its state under the ``etcode-manager`` directory:
 
 * ``out/etcode-base-v1-amd64.qcow2`` — immutable template image
 * ``vms/<vm-dir>/``                  — one directory per VM (disk, seed, state)
-* ``config.json``                    — optional user overrides
+* ``config.json``                    — the tracked defaults (``base_image`` only)
+* ``config.local.json``              — git-ignored user overrides (backend URL/token, scaling, ...)
 
-``backend_url`` and ``backend_token`` in ``config.json`` are the defaults for the etcode backend that the
+``config.json`` is under version control and must stay free of secrets, so it holds nothing but
+``base_image``. Everything else lives in ``config.local.json``, which is git-ignored and written with
+mode 0600. A key in ``config.local.json`` wins over the same key in ``config.json``.
+
+``backend_url`` and ``backend_token`` in ``config.local.json`` are the defaults for the etcode backend that the
 desktop app inside a VM talks to. They are copied into each new VM (``vm.json`` and the cloud-init seed).
 
 ``scaling`` selects the default screen filter for new manager windows (``area`` or ``lanczos``). The same
-values can be changed from the manager's Settings dialog, which writes them back to ``config.json``.
+values can be changed from the manager's Settings dialog, which writes them back to ``config.local.json``.
 """
 
 from __future__ import annotations
@@ -29,7 +34,8 @@ MANAGER_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_IMAGE = MANAGER_ROOT / "out" / "etcode-base-v1-amd64.qcow2"
 LEGACY_BASE_IMAGE = MANAGER_ROOT / "build" / "debian-13-generic-amd64.qcow2"
 DEFAULT_VMS_DIR = MANAGER_ROOT / "vms"
-CONFIG_FILE = MANAGER_ROOT / "config.json"
+CONFIG_FILE = MANAGER_ROOT / "config.json"            # tracked: base_image (and legacy keys) only
+LOCAL_CONFIG_FILE = MANAGER_ROOT / "config.local.json"  # git-ignored: everything else (holds the token)
 
 # The host as seen from a guest behind QEMU's user-mode networking (``-netdev user``).
 DEFAULT_BACKEND_URL = "http://10.0.2.2:8765"
@@ -92,7 +98,7 @@ def normalize_scaling(value: object) -> str:
     """Return a canonical scaling name (``area`` or ``lanczos``), or raise ``ValueError``.
 
     The user-facing names from the selector ("Smooth", "Sharper") are accepted too, so a hand-written
-    ``config.json`` can use whichever name is clearer.
+    ``config.local.json`` can use whichever name is clearer.
     """
     if not isinstance(value, str):
         raise ValueError("The scaling algorithm must be text.")
@@ -169,66 +175,21 @@ class Settings:
             )
 
 
-def load_settings() -> Settings:
-    """Load settings from ``config.json`` (if present) and detect tools."""
-    cfg: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Cannot read {CONFIG_FILE}: {exc}") from exc
-
-    base_image = Path(cfg.get("base_image", DEFAULT_BASE_IMAGE)).expanduser()
-    if not base_image.exists() and base_image == DEFAULT_BASE_IMAGE and LEGACY_BASE_IMAGE.exists():
-        base_image = LEGACY_BASE_IMAGE
-
+def _read_config(path: Path, verb: str = "read") -> dict:
+    """Return the JSON object stored in ``path`` (``{}`` when the file does not exist), or raise ``RuntimeError``."""
+    if not path.exists():
+        return {}
     try:
-        backend_url = normalize_backend_url(cfg.get("backend_url", ""))
-        backend_token = normalize_backend_token(cfg.get("backend_token", ""))
-    except ValueError as exc:  # the message never contains the token
-        raise RuntimeError(f"Invalid backend setting in {CONFIG_FILE}: {exc}") from exc
-    try:
-        # ``scaling_filter`` is the historical/descriptive alias; ``scaling`` wins when both exist.
-        scaling = normalize_scaling(cfg.get("scaling", cfg.get("scaling_filter", DEFAULT_SCALING)))
-    except ValueError as exc:
-        raise RuntimeError(f"Invalid scaling setting in {CONFIG_FILE}: {exc}") from exc
-
-    settings = Settings(
-        base_image=base_image.resolve(),
-        vms_dir=Path(cfg.get("vms_dir", DEFAULT_VMS_DIR)).expanduser().resolve(),
-        qemu_system=_find_tool("qemu-system-x86_64", "qemu-system-x86_64.exe"),
-        qemu_img=_find_tool("qemu-img", "qemu-img.exe"),
-        ssh_public_key=str(cfg.get("ssh_public_key", "")).strip(),
-        backend_url=backend_url,
-        backend_token=backend_token,
-        scaling=scaling,
-        extra={k: v for k, v in cfg.items() if k not in _CONFIG_KEYS},
-    )
-    return settings
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot {verb} {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Cannot {verb} {path}: the top level is not a JSON object.")
+    return data
 
 
-def save_settings(settings: Settings, path: Path | None = None) -> Path:
-    """Persist the user-editable defaults to ``config.json`` and return the file path.
-
-    The backend URL/token and the scaling default are written; every other key that is already in the file
-    (``base_image``, ``vms_dir``, custom keys, ...) is kept. The file can contain a token, so it is written
-    atomically with mode 0600, just like ``vm.json`` and the seed ISO.
-    """
-    path = CONFIG_FILE if path is None else path
-    data: dict = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Cannot update {path}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise RuntimeError(f"Cannot update {path}: the top level is not a JSON object.")
-
-    data["backend_url"] = normalize_backend_url(settings.backend_url)
-    data["backend_token"] = normalize_backend_token(settings.backend_token)
-    data["scaling"] = normalize_scaling(settings.scaling)
-    data.pop("scaling_filter", None)  # the alias is read for compatibility; write only the canonical key
-
+def _write_config(path: Path, data: dict) -> None:
+    """Write ``data`` as JSON to ``path`` atomically with mode 0600 (the file can hold the token)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -247,6 +208,84 @@ def save_settings(settings: Settings, path: Path | None = None) -> Path:
         except OSError:
             pass
         raise
+
+
+def load_settings() -> Settings:
+    """Load settings from ``config.json`` and the git-ignored ``config.local.json`` (if present) and detect tools.
+
+    Both files hold JSON objects and are merged key by key; a key in ``config.local.json`` wins over the same
+    key in ``config.json``, so the tracked file can keep carrying legacy values for old checkouts.
+    """
+    tracked = _read_config(CONFIG_FILE)
+    local = _read_config(LOCAL_CONFIG_FILE)
+    cfg = {**tracked, **local}
+
+    def source(key: str) -> Path:
+        """The file a key actually comes from (for error messages)."""
+        return LOCAL_CONFIG_FILE if key in local else CONFIG_FILE
+
+    base_image = Path(cfg.get("base_image", DEFAULT_BASE_IMAGE)).expanduser()
+    if not base_image.exists() and base_image == DEFAULT_BASE_IMAGE and LEGACY_BASE_IMAGE.exists():
+        base_image = LEGACY_BASE_IMAGE
+
+    try:
+        backend_url = normalize_backend_url(cfg.get("backend_url", ""))
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid backend_url in {source('backend_url')}: {exc}") from exc
+    try:
+        backend_token = normalize_backend_token(cfg.get("backend_token", ""))
+    except ValueError as exc:  # the message never contains the token
+        raise RuntimeError(f"Invalid backend_token in {source('backend_token')}: {exc}") from exc
+    try:
+        # ``scaling_filter`` is the historical/descriptive alias; ``scaling`` wins when both exist.
+        scaling = normalize_scaling(cfg.get("scaling", cfg.get("scaling_filter", DEFAULT_SCALING)))
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid scaling setting in {source('scaling')}: {exc}") from exc
+
+    settings = Settings(
+        base_image=base_image.resolve(),
+        vms_dir=Path(cfg.get("vms_dir", DEFAULT_VMS_DIR)).expanduser().resolve(),
+        qemu_system=_find_tool("qemu-system-x86_64", "qemu-system-x86_64.exe"),
+        qemu_img=_find_tool("qemu-img", "qemu-img.exe"),
+        ssh_public_key=str(cfg.get("ssh_public_key", "")).strip(),
+        backend_url=backend_url,
+        backend_token=backend_token,
+        scaling=scaling,
+        extra={k: v for k, v in cfg.items() if k not in _CONFIG_KEYS},
+    )
+    return settings
+
+
+def save_settings(settings: Settings, path: Path | None = None) -> Path:
+    """Persist the user-editable defaults to the git-ignored ``config.local.json`` and return the file path.
+
+    The backend URL/token and the scaling default are written; every other key that is already in the file
+    (``vms_dir``, custom keys, ...) is kept. Any key except ``base_image`` that the tracked ``config.json``
+    still holds is moved here too (values already present win), so the tracked file converges to the one key
+    that belongs in version control and no secret stays tracked. The file can contain a token, so it is
+    written atomically with mode 0600, just like ``vm.json`` and the seed ISO.
+    """
+    path = LOCAL_CONFIG_FILE if path is None else path
+    data = _read_config(path, verb="update")
+
+    data["backend_url"] = normalize_backend_url(settings.backend_url)
+    data["backend_token"] = normalize_backend_token(settings.backend_token)
+    data["scaling"] = normalize_scaling(settings.scaling)
+    data.pop("scaling_filter", None)  # the alias is read for compatibility; write only the canonical key
+
+    # Spin everything but ``base_image`` out of the tracked ``config.json`` (migrating the values this file
+    # does not hold yet) so that nothing user- or machine-specific — and no secret — stays in version control.
+    tracked = {} if CONFIG_FILE == path else _read_config(CONFIG_FILE, verb="update")
+    pruned: dict = {}
+    for key, value in tracked.items():
+        if key == "base_image":
+            pruned[key] = value
+        elif key != "scaling_filter":  # the alias is superseded by the canonical key written above
+            data.setdefault(key, value)
+
+    _write_config(path, data)
+    if pruned != tracked:  # only touch the tracked file when it still carries spun-out keys
+        _write_config(CONFIG_FILE, pruned)
     return path
 
 

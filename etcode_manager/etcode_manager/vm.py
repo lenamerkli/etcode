@@ -170,7 +170,7 @@ class VMManager:
         """Create a new VM: overlay disk + cloud-init seed ISO.
 
         ``backend_url`` and ``backend_token`` are what the desktop app inside the VM will use. ``None`` means the
-        defaults from the settings (``config.json``); an empty URL means the default URL, an empty token means none.
+        defaults from the settings (``config.local.json``); an empty URL means the default URL, an empty token means none.
         """
         self.settings.require_tools()
         name = name.strip()

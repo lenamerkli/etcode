@@ -261,3 +261,4 @@ release/
 dist-smoke/
 vms/
 etcode_backend/data/
+config.local.json

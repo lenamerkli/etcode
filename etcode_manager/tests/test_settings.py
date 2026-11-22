@@ -20,6 +20,15 @@ from etcode_manager.scaling import ScalingFilter
 from etcode_manager.vm import VMManager
 
 
+def patch_config(tmp):
+    """Point the tracked (``config.json``) and the git-ignored (``config.local.json``) config file at ``tmp``."""
+    return patch.multiple(
+        manager_config,
+        CONFIG_FILE=Path(tmp) / "config.json",
+        LOCAL_CONFIG_FILE=Path(tmp) / "config.local.json",
+    )
+
+
 
 class ScalingConfigTest(unittest.TestCase):
     def test_normalize_scaling(self):
@@ -39,30 +48,38 @@ class ScalingConfigTest(unittest.TestCase):
 
     def test_load_reads_the_scaling_default_and_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
+            local = Path(tmp) / "config.local.json"
             for content, expected in (
                 ({"scaling": "lanczos"}, "lanczos"),
                 ({"scaling_filter": "Sharper"}, "lanczos"),
                 ({}, DEFAULT_SCALING),
             ):
                 with self.subTest(content=content):
-                    cfg.write_text(json.dumps(content))
-                    with patch.object(manager_config, "CONFIG_FILE", cfg):
+                    local.write_text(json.dumps(content))
+                    with patch_config(tmp):
                         settings = load_settings()
                     self.assertEqual(settings.scaling, expected)
                     self.assertEqual(settings.scaling_filter, ScalingFilter(expected))
 
+    def test_local_file_wins_over_the_tracked_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "config.json").write_text(json.dumps({"scaling": "area", "backend_token": "old"}))
+            (Path(tmp) / "config.local.json").write_text(json.dumps({"scaling": "lanczos", "backend_token": "new"}))
+            with patch_config(tmp):
+                settings = load_settings()
+        self.assertEqual((settings.scaling, settings.backend_token), ("lanczos", "new"))
+
     def test_invalid_scaling_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
-            cfg.write_text(json.dumps({"scaling": "nearest"}))
-            with patch.object(manager_config, "CONFIG_FILE", cfg), self.assertRaises(RuntimeError) as caught:
+            (Path(tmp) / "config.local.json").write_text(json.dumps({"scaling": "nearest"}))
+            with patch_config(tmp), self.assertRaises(RuntimeError) as caught:
                 load_settings()
         self.assertIn("scaling", str(caught.exception))
 
-    def test_save_preserves_other_keys_and_is_private(self):
+    def test_save_moves_everything_but_base_image_into_the_local_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "config.json"
+            local = Path(tmp) / "config.local.json"
             cfg.write_text(json.dumps({
                 "base_image": "/tmp/base.qcow2",
                 "custom": {"keep": True},
@@ -72,24 +89,25 @@ class ScalingConfigTest(unittest.TestCase):
                 backend_url="https://srv.example/api/", backend_token=" new-token ",
                 scaling="lanczos",
             )
-            result = save_settings(settings, cfg)
-            self.assertEqual(result, cfg)
-            data = json.loads(cfg.read_text())
-            self.assertEqual(data["base_image"], "/tmp/base.qcow2")
-            self.assertEqual(data["custom"], {"keep": True})
+            with patch_config(tmp):
+                result = save_settings(settings)
+            self.assertEqual(result, local)
+            tracked = json.loads(cfg.read_text())
+            self.assertEqual(tracked, {"base_image": "/tmp/base.qcow2"})  # nothing but base_image stays tracked
+            data = json.loads(local.read_text())
+            self.assertEqual(data["custom"], {"keep": True})  # spun out of the tracked file, not lost
             self.assertEqual(data["backend_url"], "https://srv.example/api")
             self.assertEqual(data["backend_token"], "new-token")
             self.assertEqual(data["scaling"], "lanczos")
             self.assertNotIn("scaling_filter", data)
-            self.assertEqual(sorted(p.name for p in cfg.parent.glob("config.json*")), ["config.json"])
+            self.assertEqual(sorted(p.name for p in Path(tmp).glob("*.tmp")), [])
             if sys.platform != "win32":
-                self.assertEqual(stat.S_IMODE(cfg.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(local.stat().st_mode), 0o600)
 
     def test_saved_defaults_are_loaded_for_future_vms(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
             settings = Settings(backend_url="https://srv.example", backend_token="tok", scaling="lanczos")
-            with patch.object(manager_config, "CONFIG_FILE", cfg):
+            with patch_config(tmp):
                 save_settings(settings)
                 loaded = load_settings()
             self.assertEqual((loaded.backend_url, loaded.backend_token, loaded.scaling),
@@ -97,21 +115,21 @@ class ScalingConfigTest(unittest.TestCase):
 
     def test_clearing_the_token_removes_the_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
-            with patch.object(manager_config, "CONFIG_FILE", cfg):
+            local = Path(tmp) / "config.local.json"
+            with patch_config(tmp):
                 save_settings(Settings(backend_token="secret"))
-                self.assertIn("secret", cfg.read_text())
+                self.assertIn("secret", local.read_text())
                 save_settings(Settings(backend_token=""))
-                self.assertNotIn("secret", cfg.read_text())
+                self.assertNotIn("secret", local.read_text())
                 self.assertEqual(load_settings().backend_token, "")
 
     def test_invalid_existing_config_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
-            cfg.write_text("{not json")
-            with self.assertRaises(RuntimeError):
-                save_settings(Settings(backend_token="tok"), cfg)
-            self.assertEqual(cfg.read_text(), "{not json")
+            local = Path(tmp) / "config.local.json"
+            local.write_text("{not json")
+            with patch_config(tmp), self.assertRaises(RuntimeError):
+                save_settings(Settings(backend_token="tok"))
+            self.assertEqual(local.read_text(), "{not json")
 
 
 class SettingsDialogTest(unittest.TestCase):
@@ -180,7 +198,7 @@ class MainWindowSettingsTest(unittest.TestCase):
         from etcode_manager import app as app_module
 
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
+            local = Path(tmp) / "config.local.json"
             window = self.make_window(tmp, backend_url=DEFAULT_BACKEND_URL, backend_token="old")
             try:
                 class FakeDialog(app_module.SettingsDialog):
@@ -193,8 +211,7 @@ class MainWindowSettingsTest(unittest.TestCase):
                     def exec(self):
                         return QDialog.DialogCode.Accepted
 
-                with patch.object(manager_config, "CONFIG_FILE", cfg), \
-                        patch.object(app_module, "SettingsDialog", FakeDialog):
+                with patch_config(tmp), patch.object(app_module, "SettingsDialog", FakeDialog):
                     window.on_settings()
 
                 self.assertEqual(window.settings.backend_url, "https://new.example")
@@ -202,7 +219,7 @@ class MainWindowSettingsTest(unittest.TestCase):
                 self.assertEqual(window.settings.scaling, "lanczos")
                 self.assertEqual(window.scaling_combo.currentData(), ScalingFilter.LANCZOS)
                 self.assertEqual(window.screen.scaling_filter, ScalingFilter.LANCZOS)
-                data = json.loads(cfg.read_text())
+                data = json.loads(local.read_text())
                 self.assertEqual((data["backend_token"], data["scaling"]), ("new-token", "lanczos"))
             finally:
                 window.close()
@@ -231,11 +248,9 @@ class MainWindowSettingsTest(unittest.TestCase):
                 return QDialog.DialogCode.Accepted
 
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
             window = self.make_window(tmp)
             try:
-                with patch.object(manager_config, "CONFIG_FILE", cfg), \
-                        patch.object(app_module, "SettingsDialog", FakeSettingsDialog):
+                with patch_config(tmp), patch.object(app_module, "SettingsDialog", FakeSettingsDialog):
                     window.on_settings()
                 from etcode_manager.vm import VM
                 with patch.object(app_module, "NewVMDialog", FakeNewDialog), \

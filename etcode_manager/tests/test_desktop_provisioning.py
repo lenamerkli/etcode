@@ -36,6 +36,15 @@ NASTY_TOKEN = 'a"b\\c\'d#e: {f} [g] - h | > & * ! % @ `i\u00e9\u4e2d'
 POSIX_ONLY = unittest.skipIf(sys.platform == "win32", "file modes")
 
 
+def patch_config(tmp):
+    """Point the tracked (``config.json``) and the git-ignored (``config.local.json``) config file at ``tmp``."""
+    return patch.multiple(
+        manager_config,
+        CONFIG_FILE=Path(tmp) / "config.json",
+        LOCAL_CONFIG_FILE=Path(tmp) / "config.local.json",
+    )
+
+
 class BackendSettingsTest(unittest.TestCase):
     def test_url_defaults_and_cleaning(self):
         self.assertEqual(normalize_backend_url(""), DEFAULT_BACKEND_URL)
@@ -84,9 +93,11 @@ class BackendSettingsTest(unittest.TestCase):
 
     def test_load_settings_reads_backend_values(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
-            cfg.write_text(json.dumps({"backend_url": "https://b.example/", "backend_token": " tok ", "other": 1}))
-            with patch.object(manager_config, "CONFIG_FILE", cfg):
+            # The values live in the git-ignored local file; the tracked one keeps only base_image.
+            (Path(tmp) / "config.json").write_text(json.dumps({"base_image": "base.qcow2"}))
+            (Path(tmp) / "config.local.json").write_text(
+                json.dumps({"backend_url": "https://b.example/", "backend_token": " tok ", "other": 1}))
+            with patch_config(tmp):
                 settings = manager_config.load_settings()
         self.assertEqual(settings.backend_url, "https://b.example")
         self.assertEqual(settings.backend_token, "tok")
@@ -94,15 +105,15 @@ class BackendSettingsTest(unittest.TestCase):
 
     def test_load_settings_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(manager_config, "CONFIG_FILE", Path(tmp) / "missing.json"):
+            with patch_config(tmp):  # neither config file exists
                 settings = manager_config.load_settings()
         self.assertEqual((settings.backend_url, settings.backend_token), (DEFAULT_BACKEND_URL, ""))
 
     def test_invalid_config_is_reported_without_the_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / "config.json"
-            cfg.write_text(json.dumps({"backend_url": "ftp://x", "backend_token": "sekrit token"}))
-            with patch.object(manager_config, "CONFIG_FILE", cfg), self.assertRaises(RuntimeError) as caught:
+            (Path(tmp) / "config.local.json").write_text(
+                json.dumps({"backend_url": "ftp://x", "backend_token": "sekrit token"}))
+            with patch_config(tmp), self.assertRaises(RuntimeError) as caught:
                 manager_config.load_settings()
         self.assertNotIn("sekrit", str(caught.exception))
 

@@ -38,7 +38,7 @@ python -m etcode_manager
 
 The **Scaling** selector next to the screen connection buttons switches between:
 
-* **Smooth (area)** — the default unless `scaling` in `config.json` says otherwise. Uses Qt's
+* **Smooth (area)** — the default unless `scaling` in `config.local.json` says otherwise. Uses Qt's
   area-averaged reduction to avoid dropping thin glyph strokes when the 1920×1080 desktop is
   fitted into a much smaller pane. Enlargement uses Qt's smooth interpolation.
 * **Sharper (Lanczos)** — uses Pillow's antialiased Lanczos-3 filter for crisper text and
@@ -47,7 +47,7 @@ The **Scaling** selector next to the screen connection buttons switches between:
 
 Changing the selector applies to the current manager window. To change the default for future
 windows, open **Settings…** in the toolbar: it saves the choice as `scaling` (`"area"` or
-`"lanczos"`) in `config.json`. Neither the selector nor the default changes the guest's resolution.
+`"lanczos"`) in `config.local.json`. Neither the selector nor the default changes the guest's resolution.
 
 Both modes resize the **original framebuffer directly to the physical output pixel size**,
 including fractional display scaling (125%, 150%, etc.). The result and letterbox position
@@ -62,11 +62,20 @@ rebuild or extra guest software is needed. Neither filter can recover detail onc
 only a few pixels high; enlarging the window or lowering the resolution in the guest's Display
 settings can still help on small screens.
 
-## Configuration (`config.json`, optional)
+## Configuration (`config.json`, `config.local.json`, optional)
+
+`config.json` is tracked by git and holds only the template image:
 
 ```json
 {
-  "base_image": "/path/to/etcode-base-v1-amd64.qcow2",
+  "base_image": "/path/to/etcode-base-v1-amd64.qcow2"
+}
+```
+
+Everything else lives in `config.local.json`, which is **git-ignored** because it can hold the token:
+
+```json
+{
   "vms_dir": "/path/to/vms",
   "ssh_public_key": "ssh-ed25519 AAAA... you@host",
   "backend_url": "http://10.0.2.2:8765",
@@ -74,6 +83,10 @@ settings can still help on small screens.
   "scaling": "area"
 }
 ```
+
+A key in `config.local.json` wins over the same key in `config.json`. A `config.json` from before the
+split keeps working: its other keys are read, and they are moved to `config.local.json` the next time
+the Settings dialog saves, so nothing user- or machine-specific stays in version control.
 
 `ssh_public_key` is baked into each new VM's cloud-init `user-data` so you
 can SSH into the `agent` user. `backend_url` and `backend_token` are the defaults for the
@@ -83,8 +96,8 @@ etcode backend that the desktop app in a VM talks to (see "The etcode desktop ap
 
 The manager's **Settings…** dialog changes these defaults without editing the file by hand:
 the default backend URL and token for VMs created from now on, and the default scaling algorithm.
-It keeps all other keys in `config.json`. Existing VMs keep the backend settings they were created
-with (their token lives in their own `vm.json`). Because `config.json` can hold the token, the
+It keeps all other keys in `config.local.json`. Existing VMs keep the backend settings they were created
+with (their token lives in their own `vm.json`). Because `config.local.json` can hold the token, the
 manager writes it atomically with mode 0600, like `vm.json` and `seed.iso`.
 
 The VMs are stored as:
@@ -106,7 +119,7 @@ closed), and `/etc/xdg/autostart/etcode-desktop.desktop` starts it maximized whe
 seconds after the panel. The manager does not launch it.
 
 **Backend URL and token.** The *New VM* dialog has the fields *Backend URL* and *Backend token*, prefilled from
-`backend_url` and `backend_token` in `config.json` or from the manager's **Settings…** dialog (default URL
+`backend_url` and `backend_token` in `config.local.json` or from the manager's **Settings…** dialog (default URL
 `http://10.0.2.2:8765`: the host, as seen from a VM behind QEMU's user-mode network; a server is just another
 URL). Change them per VM to give one VM its own token. An empty URL means the default, an empty token
 means that the app asks for one when it starts.
@@ -117,7 +130,7 @@ mode 0600). The app reads that file as its "provisioned" layer.
 * **Changes do not reach a VM that has booted.** cloud-init writes the file once per instance id, and the
   manager keeps the instance id stable. To change the token of an existing VM, use the connection dialog of
   the desktop app (the gear in its status bar). A value set there wins over the provisioned one.
-* **The token is a secret.** It is in `config.json` (mode 0600 after the manager saves it), `vm.json` and
+* **The token is a secret.** It is in `config.local.json` (git-ignored, mode 0600 after the manager saves it), `vm.json` and
   `seed.iso` on your disk (both mode 0600), and in the VM in `/etc/etcode/desktop.json`.
   **The model can read it**: it runs commands as `agent`, who can also use `sudo`. A backend token only
   reaches the sessions of its own owner, so use a token that is only for etcode VMs
@@ -144,7 +157,7 @@ python -m unittest discover -s tests
 `tests/test_desktop_provisioning.py` covers the backend settings, the `write_files` section of the seed (valid YAML for
 any token, and the JSON is what the desktop app reads), the private files, the dialog, and that the image scripts,
 packaging files and panel layout fit together. `tests/test_settings.py` covers the default-token/scaling settings,
-`config.json` migration and privacy, the Settings dialog, and the window that applies those defaults.
+`config.local.json` migration and privacy, the Settings dialog, and the window that applies those defaults.
 `tests/test_scaling.py` covers area/Lanczos filtering, aliasing,
 cache invalidation and input mapping. It also checks actual offscreen painting in subprocesses at 100%, 125%, 150%
 and 200% display scaling: the displayed pixels must exactly match a single resampling of the original frame.
