@@ -21,7 +21,7 @@ def test_text_reasoning_sse_and_options(client, worker, upstream, settings):
     assert gid
     wait_status(client, sid, "idle")
     req = upstream.requests[0]["body"]
-    assert req["model"] == "deepseek/deepseek-v4.1-flash-1017:nitro"
+    assert req["model"] == "deepseek/deepseek-v4.1-flash-1017"
     assert req["provider"] == {"order": ["together"], "allow_fallbacks": False}
     assert req["reasoning"] == {"effort": "high"}
     assert req["temperature"] == 0.3 and req["max_tokens"] == 37

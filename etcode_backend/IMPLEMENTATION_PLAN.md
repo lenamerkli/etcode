@@ -92,3 +92,4 @@ etcode_backend/
 - The extra user message for images in tool results is used for both providers, because neither documents image support in tool results.
 - `GET /sessions` was added later (see DECISIONS.md). It runs one metadata query set per listed session (at most 500). If that becomes slow, fold `message_count`, `queued_count` and the active generation into one grouped query. The `sessions_owner_updated` index serves the ordering. Titles are read with SQLite's `json_extract`, which needs SQLite 3.38 or newer (or the JSON1 extension).
 - `pending_tool_calls` comes straight from the `pending_tool_calls` table, so it costs one extra query per metadata request.
+- The curated catalog is the 34-entry list in `catalog.py` (Arena Coding Router plus 33 OpenRouter models), not the two examples above. Every entry supports native tool calling; `deepseek-v4.1-flash-1017` is pinned to Together, no fallback prices are set.

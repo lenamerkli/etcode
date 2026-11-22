@@ -11,9 +11,19 @@ def test_auth_required(client):
 def test_models_catalog(client):
     models = client.get("/models", headers=A).json
     by = {m["tech_name"]: m for m in models}
+    assert len(models) == 34 and len(by) == len(models)
     assert by["arena-coding-router"]["provider_tech_name"] == "coding-router-preview"
     assert "openrouter_internal_provider" not in by["arena-coding-router"]
+    assert by["deepseek-v4.1-flash-1017"]["provider_tech_name"] == "deepseek/deepseek-v4.1-flash-1017"
     assert by["deepseek-v4.1-flash-1017"]["openrouter_internal_provider"] == "together"
+    assert by["gemini-4-argon"]["provider_tech_name"] == "google/gemini-4-argon"
+    assert by["nemotron-3-ultra-550b-a55b:free"]["provider_tech_name"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert by["glm-5.3-flash"]["context_length"] == 1_300_000
+    assert by["north-mini-code:free"]["context_length"] == 260_000
+    assert by["solar-pro4"]["context_length"] == 520_000
+    text_only = {"deepseek-v4-pro-0813", "glm-5.3", "nemotron-3-ultra-550b-a55b:free",
+                 "north-mini-code:free", "solar-pro4"}
+    assert {m["tech_name"] for m in models if not m["supports_images"]} == text_only
     assert all(m["available"] for m in models)
 
 
@@ -47,6 +57,19 @@ def test_model_change_rules(client):
     r = client.patch(f"/session/{sid}/model", json={"model": "deepseek-v4.1-flash-1017"}, headers=A)
     assert r.status_code == 200 and r.json["model"] == "deepseek-v4.1-flash-1017"
     assert client.patch(f"/session/{sid}/model", json={"model": "x"}, headers=A).status_code == 400
+
+
+def test_model_change_vision_rules(client):
+    sid = new_session(client)  # arena-coding-router, vision
+    r = client.patch(f"/session/{sid}/model", json={"model": "deepseek-v4-pro-0813"}, headers=A)
+    assert r.status_code == 409 and r.json["error"]["code"] == "incompatible_model"
+    r = client.patch(f"/session/{sid}/model", json={"model": "claude-haiku-5.5"}, headers=A)
+    assert r.status_code == 200 and r.json["model"] == "claude-haiku-5.5"
+    sid = new_session(client, model="solar-pro4")  # text only
+    r = client.patch(f"/session/{sid}/model", json={"model": "glm-5.3"}, headers=A)
+    assert r.status_code == 200 and r.json["model"] == "glm-5.3"
+    r = client.patch(f"/session/{sid}/model", json={"model": "arena-coding-router"}, headers=A)
+    assert r.status_code == 409 and r.json["error"]["code"] == "incompatible_model"
 
 
 def test_stream_204_when_idle(client):

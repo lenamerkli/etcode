@@ -28,7 +28,7 @@ These decisions supplement the original API/model/tool sketches in [PLAN.md](PLA
 
 ## Follow-up decisions
 - Websearch uses Brave Search behind a pluggable search-provider interface, so the provider is easy to change.
-- The starting model catalog is exactly the two supplied entries (Arena Coding Router, DeepSeek V4.1 Flash via OpenRouter/Together).
+- The model catalog is the curated 34-entry list in `catalog.py` (Arena Coding Router plus 33 OpenRouter models). Every entry must support native tool calling, which etcode requires; that is an entry requirement, not a stored capability flag. `tech_name` is the display-name slug for the Arena entry (`arena-coding-router`) and the part after `/` of the OpenRouter slug for OpenRouter entries, with `:free` variant suffixes kept (`nemotron-3-ultra-550b-a55b:free`). DeepSeek V4.1 Flash is pinned to Together via `openrouter_internal_provider`; the other OpenRouter entries route freely. No fallback catalog prices are set: OpenRouter reports `usage.cost` itself.
 - Sessions (and uploaded media) are owned by the token that created them; other tokens cannot see them.
 - Accepted: batch `POST /session/<id>/messages` with `{"messages": [...]}`; user messages arriving during a tool-call chain wait until the chain finishes; inference options are set per session and may be overridden per submission.
 - Cost is accumulated per session in USD from the provider-reported `usage.cost`, with optional catalog prices as a fallback. Generations that produced output but cannot be priced are counted in `unpriced_generations` instead of being treated as free.

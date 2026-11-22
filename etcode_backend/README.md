@@ -144,4 +144,6 @@ follow it.
 * Switching search providers: implement `search(query) -> list[{title,url,description,age}]`
   in `etcode_backend/search/`, add it to the registry in
   `etcode_backend/search/__init__.py`, and set `ETCODE_SEARCH_PROVIDER`.
-* Adding models: add an entry to `etcode_backend/catalog.py`.
+* Adding models: add an entry to `etcode_backend/catalog.py`. The model must
+  support native tool calling (a requirement, not a catalog field) and `tech_name`
+  must stay stable: it is stored in existing sessions.
