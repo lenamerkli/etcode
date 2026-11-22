@@ -10,7 +10,8 @@ Layout per VM (see PLAN.md):
 
 VM state is discovered by scanning the vms directory, so it survives
 application restarts.  QEMU is launched detached with a QMP control socket
-and a VNC display on loopback.
+and a VNC display on loopback. VMs with file access enabled also have a stable
+loopback port forwarded to the guest's SSH server.
 """
 
 from __future__ import annotations
@@ -24,14 +25,18 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, asdict, field
+from contextlib import ExitStack
+from dataclasses import dataclass, asdict, field, replace
 from pathlib import Path
 
-from .config import Settings, normalize_backend_token, normalize_backend_url
+from .config import Settings, normalize_backend_token, normalize_backend_url, normalize_ssh_public_key
 from .qmp import QMPClient, QMPError
 from .seed import write_seed_iso
 
 VM_JSON = "vm.json"
+SFTP_HOST = "127.0.0.1"
+# Below the default ephemeral port range and separate from the VNC displays.
+SFTP_PORTS = range(22000, 23000)
 
 
 class VMError(RuntimeError):
@@ -56,6 +61,18 @@ class VM:
     # needs them whenever it is regenerated. The token is a secret: vm.json is private, and it stays out of repr().
     backend_url: str = ""
     backend_token: str = field(default="", repr=False)
+    ssh_port: int = 0       # persistent; 0 means no forward (including in older vm.json files)
+
+    def __post_init__(self) -> None:
+        # This value goes into a comma-separated QEMU option and must be a literal port number.
+        if type(self.ssh_port) is not int or not (self.ssh_port == 0 or 1024 <= self.ssh_port <= 65535):
+            raise ValueError("Invalid SSH port in VM metadata.")
+
+    @property
+    def sftp_url(self) -> str | None:
+        if self.ssh_port:
+            return f"sftp://agent@{SFTP_HOST}:{self.ssh_port}/home/agent/"
+        return None
 
     @property
     def hostname(self) -> str:
@@ -90,6 +107,20 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _bind_sftp_port(port: int) -> socket.socket:
+    """Probe/reserve a loopback TCP port until QEMU is ready to take it."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if sys.platform != "win32":
+            # Like QEMU's user networking, allow a restart while old connections are in TIME_WAIT.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((SFTP_HOST, port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
 
 
 def _free_vnc_display() -> tuple[int, int]:
@@ -129,7 +160,7 @@ class VMManager:
             try:
                 data = json.loads(meta.read_text(encoding="utf-8"))
                 vm = VM(**{k: v for k, v in data.items() if k in VM.__dataclass_fields__})
-            except (OSError, json.JSONDecodeError, TypeError):
+            except (OSError, ValueError, TypeError):
                 continue
             vm.status = "running" if self.is_running(vm) else "stopped"
             vms.append(vm)
@@ -156,6 +187,33 @@ class VMManager:
                 pass
             raise
 
+    # -- file access --------------------------------------------------------
+
+    def _free_sftp_port(self) -> int:
+        # A stopped VM still owns its assigned port: its Dolphin bookmark must not point at a different VM.
+        reserved = {vm.ssh_port for vm in self.list()}
+        for port in SFTP_PORTS:
+            if port not in reserved:
+                try:
+                    with _bind_sftp_port(port):
+                        return port
+                except OSError:
+                    continue
+        raise VMError(f"No free loopback port for file access ({SFTP_PORTS.start}–{SFTP_PORTS.stop - 1}).")
+
+    def set_file_access(self, vm: VM, enabled: bool) -> None:
+        """Change a stopped VM's forwarding on the next boot; leave its disk and seed alone."""
+        if self.is_running(vm):
+            raise VMError("Stop the VM before changing file access.")
+        if enabled == bool(vm.ssh_port):
+            return
+        port = self._free_sftp_port() if enabled else 0
+        try:
+            self._save(replace(vm, ssh_port=port))
+        except OSError as exc:
+            raise VMError(f"Could not save file access settings: {exc}") from exc
+        vm.ssh_port = port
+
     # -- create -------------------------------------------------------------
 
     def create(
@@ -166,11 +224,13 @@ class VMManager:
         disk_gb: int = 20,
         backend_url: str | None = None,
         backend_token: str | None = None,
+        file_access: bool = False,
     ) -> VM:
         """Create a new VM: overlay disk + cloud-init seed ISO.
 
         ``backend_url`` and ``backend_token`` are what the desktop app inside the VM will use. ``None`` means the
         defaults from the settings (``config.local.json``); an empty URL means the default URL, an empty token means none.
+        ``file_access`` opts into the SSH forward; the host's public key must be configured.
         """
         self.settings.require_tools()
         name = name.strip()
@@ -183,8 +243,11 @@ class VMManager:
             backend_token = normalize_backend_token(
                 self.settings.backend_token if backend_token is None else backend_token
             )
+            ssh_public_key = normalize_ssh_public_key(self.settings.ssh_public_key)
         except ValueError as exc:
             raise VMError(str(exc)) from exc
+        if file_access and not ssh_public_key:
+            raise VMError("Set an SSH public key in Settings before enabling file access for a new VM.")
         if any(vm.name == name for vm in self.list()):
             raise VMError(f"A VM named '{name}' already exists.")
         if not self.settings.base_image.exists():
@@ -194,7 +257,8 @@ class VMManager:
             )
 
         vm = VM(id=str(uuid.uuid4()), name=name, cpus=cpus, memory_mb=memory_mb,
-                disk_gb=disk_gb, created=time.time(), backend_url=backend_url, backend_token=backend_token)
+                disk_gb=disk_gb, created=time.time(), backend_url=backend_url, backend_token=backend_token,
+                ssh_port=self._free_sftp_port() if file_access else 0)
         vm_dir = self.vm_dir(vm.id)
         vm_dir.mkdir(parents=True, exist_ok=False)
         disk = vm_dir / "disk.qcow2"
@@ -247,7 +311,7 @@ class VMManager:
         return vm.pid > 0 and _pid_alive(vm.pid)
 
     def start(self, vm: VM) -> VM:
-        """Boot the VM with QEMU (detached), exposing QMP and VNC on loopback."""
+        """Boot detached QEMU with loopback QMP, VNC and optional SSH forwarding."""
         self.settings.require_tools()
         if self.is_running(vm):
             raise VMError(f"'{vm.name}' is already running.")
@@ -256,8 +320,22 @@ class VMManager:
         if not disk.exists() or not seed.exists():
             raise VMError(f"VM files missing in {vm_dir}")
 
-        vm.qmp_port = _free_port()
-        display, vm.vnc_port = _free_vnc_display()
+        netdev = "user,id=net0"
+        with ExitStack() as ports:
+            if vm.ssh_port:
+                if any(other.id != vm.id and other.ssh_port == vm.ssh_port for other in self.list()):
+                    raise VMError(f"SFTP port {vm.ssh_port} is reserved for another VM.")
+                try:
+                    ports.enter_context(_bind_sftp_port(vm.ssh_port))
+                except OSError as exc:
+                    raise VMError(
+                        f"SFTP port {SFTP_HOST}:{vm.ssh_port} is unavailable. "
+                        "Free the port or disable and re-enable file access to get a new address."
+                    ) from exc
+                netdev += f",hostfwd=tcp:{SFTP_HOST}:{vm.ssh_port}-:22"
+            # Pick the dynamic control/display ports while the SSH port is reserved.
+            vm.qmp_port = _free_port()
+            display, vm.vnc_port = _free_vnc_display()
 
         log = open(vm_dir / "qemu.log", "ab")
         argv = [
@@ -270,7 +348,7 @@ class VMManager:
             "-drive", f"file={disk},format=qcow2,if=virtio",
             "-drive", f"file={seed},format=raw,if=virtio,readonly=on",
             "-device", "virtio-net-pci,netdev=net0",
-            "-netdev", "user,id=net0",
+            "-netdev", netdev,
             # Advertise a 1080p preferred mode to the guest via the virtual
             # monitor's EDID, so Xfce and QEMU's VNC framebuffer use 1920x1080.
             "-vga", "none",
@@ -306,13 +384,14 @@ class VMManager:
                     f"QEMU exited immediately (code {proc.returncode}); "
                     f"see {vm_dir / 'qemu.log'}"
                 )
+            client = QMPClient(port=vm.qmp_port)
             try:
-                client = QMPClient(port=vm.qmp_port)
                 client.connect(timeout=2.0)
-                client.close()
                 break
             except QMPError:
                 time.sleep(0.2)
+            finally:
+                client.close()
         else:
             self.stop(vm, force=True)
             raise VMError("QMP control socket never came up; see qemu.log")
@@ -341,8 +420,8 @@ class VMManager:
                 return proc.poll() is not None
             return not _pid_alive(vm.pid)
 
+        client = QMPClient(port=vm.qmp_port)
         try:
-            client = QMPClient(port=vm.qmp_port)
             client.connect(timeout=5.0)
             if force:
                 client.quit()
@@ -353,9 +432,10 @@ class VMManager:
                     time.sleep(0.3)
                 if not exited():
                     client.quit()
-            client.close()
         except QMPError:
-            pass  # fall through to process-level termination
+            pass  # QEMU may already have exited, or need process-level termination.
+        finally:
+            client.close()
 
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not exited():

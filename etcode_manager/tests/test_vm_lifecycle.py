@@ -3,10 +3,11 @@
 import json
 import os
 import shutil
+import socket
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from etcode_manager.config import Settings
@@ -76,6 +77,25 @@ class VMDisplayTest(unittest.TestCase):
                 "virtio-vga,edid=on,xres=1920,yres=1080",
             )
             self.assertEqual(argv[argv.index("-vnc") + 1], "127.0.0.1:0")
+            self.assertEqual(argv[argv.index("-netdev") + 1], "user,id=net0")
+
+
+class VMStopTest(unittest.TestCase):
+    def test_qemu_can_close_qmp_before_acknowledging_quit(self):
+        # A hard stop can reset the socket after processing quit but before sending a response.
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = VMManager(Settings(vms_dir=Path(tmp)))
+            vm = VM(id="test", name="test", ssh_port=22000, pid=12345, status="running")
+            manager.vm_dir(vm.id).mkdir()
+            manager._procs[vm.id] = Mock(poll=Mock(side_effect=[None, 0, 0]))
+            client = QMPClient()
+            sock = client._sock = Mock()
+            client._rfile = Mock(readline=Mock(side_effect=ConnectionResetError("QEMU exited")))
+            with patch.object(client, "connect"), patch("etcode_manager.vm.QMPClient", return_value=client):
+                manager.stop(vm, force=True)
+            self.assertEqual((vm.pid, vm.status, vm.ssh_port), (0, "stopped", 22000))
+            sock.close.assert_called_once()
+            self.assertEqual(manager.list()[0].sftp_url, vm.sftp_url)
 
 
 def _qemu_available() -> bool:
@@ -163,6 +183,25 @@ class VMLifecycleTest(unittest.TestCase):
         # -- delete
         self.manager.delete(vm)
         self.assertEqual(self.manager.list(), [])
+
+    def test_file_access_listener_follows_vm_lifecycle(self):
+        # The blank test disk never starts sshd, but QEMU must own the listener only while it runs.
+        vm = self.manager.create("sftp-test", cpus=1, memory_mb=256, disk_gb=1)
+        self.addCleanup(self.manager.delete, vm)
+        self.manager.set_file_access(vm, True)
+        bookmark = vm.sftp_url
+        addr = ("127.0.0.1", vm.ssh_port)
+
+        for _ in range(2):
+            self.manager.start(vm)
+            with socket.create_connection(addr, timeout=2):
+                pass
+            (listed,) = VMManager(self.settings).list()
+            self.assertEqual(listed.sftp_url, bookmark)
+            self.manager.stop(vm, force=True)
+            with self.assertRaises(OSError), socket.create_connection(addr, timeout=1):
+                self.fail("the SFTP forward is still listening after VM stop")
+            self.assertEqual(vm.sftp_url, bookmark)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ needs **no guest-side remote-desktop server** such as xrdp or VNC.
   new VM gets the backend URL and access token through its cloud-init seed (see below).
 * **Mouse and keyboard input** — clicks, wheel and keys are forwarded to
   the guest (X11 keysym translation included).
+* **Open VM Files** — opt-in SFTP access to a running VM, directly in Dolphin on Fedora.
 
 For agent-driven Firefox or game testing, the guest desktop app also has an
 [`interactive_gui` tool](data/skills/interactive_gui.md). It operates on the existing Xfce desktop,
@@ -39,6 +40,44 @@ at the new template; don't replace a base image that existing VM overlays depend
 ```bash
 python -m etcode_manager
 ```
+
+## Access guest files from the host
+
+1. **Set up your SSH key.** In the manager's **Settings…**, paste one OpenSSH `.pub` line into
+   **SSH public key**. If you don't have a key pair yet, create one on the host with `ssh-keygen -t ed25519`.
+   Keep the private key on the host and make it available to your SFTP client (for example, through
+   the graphical session's SSH agent). The public key is installed for `agent` on a new VM's first boot.
+2. **Opt in per VM.** Check **Enable SFTP file access from the host** in **New VM…**. For an existing VM,
+   stop it, select **Enable File Access** in the toolbar, and start it again. If an existing guest
+   doesn't already authorize the host's key, add its public line to `~/.ssh/authorized_keys` from the
+   guest's screen/terminal as `agent` (`~/.ssh` mode `0700`, `authorized_keys` mode `0600`). Changing
+   Settings does not update guests that have already booted.
+3. **Open the running VM.** On Fedora, install native Dolphin SFTP support if it isn't present:
+
+   ```bash
+   sudo dnf install dolphin kio-extras
+   ```
+
+   Select the VM and click **Open VM Files**. Dolphin opens at `/home/agent` via SFTP, for example
+   `sftp://agent@127.0.0.1:22000/home/agent/`. You can drag files both ways and add the location to
+   **Places**. The starting directory is not a restriction; you have the guest account's normal
+   permissions. If there is no Dolphin on the host, the manager tries the system URL handler.
+   **Copy SFTP Address** also works with another SFTP-capable file manager on Debian or with WinSCP
+   on Windows.
+
+The forward binds to `127.0.0.1` only, not the LAN. The host port is stored per VM (normally in
+`22000–22999`) and survives VM and manager restarts. It has no listener while the VM is off. If a
+port is occupied, the manager reports the conflict rather than changing your bookmark. Free the port,
+or disable and re-enable file access while the VM is stopped to allocate another one.
+
+On first connection, compare the SSH host fingerprint shown by the client with the one in the guest
+console (for Ed25519: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). Don't ignore a changed-key
+warning: a port can be reused when a VM is deleted or file access is disabled. If the connection
+fails just after start, wait for the guest to finish booting. To diagnose an authentication problem,
+try OpenSSH's `sftp -P 22000 agent@127.0.0.1` with your VM's actual port and the same client key.
+
+This is live guest access, not a host mount of `disk.qcow2`. No base image rebuild is needed for the
+standard Debian template, and powered-off disks are not exposed.
 
 ## Screen scaling and text quality
 
@@ -101,8 +140,8 @@ etcode backend that the desktop app in a VM talks to (see "The etcode desktop ap
 `sharper` are accepted as aliases).
 
 The manager's **Settings…** dialog changes these defaults without editing the file by hand:
-the default backend URL and token for VMs created from now on, and the default scaling algorithm.
-It keeps all other keys in `config.local.json`. Existing VMs keep the backend settings they were created
+the backend URL, token and SSH public key for new VMs, and the default scaling algorithm.
+It keeps other keys in `config.local.json`. Existing VMs keep the backend settings they were created
 with (their token lives in their own `vm.json`). Because `config.local.json` can hold the token, the
 manager writes it atomically with mode 0600, like `vm.json` and `seed.iso`.
 
@@ -112,7 +151,7 @@ The VMs are stored as:
 vms/<instance-id>/
     disk.qcow2   writable overlay (backed by the template)
     seed.iso     cloud-init NoCloud seed (retains its instance-id), mode 0600
-    vm.json      name, resources, ports, backend URL and token, mode 0600
+    vm.json      name, resources, ports (including optional SFTP), backend URL and token, mode 0600
     qemu.log     QEMU console output
 ```
 
@@ -170,7 +209,9 @@ and 200% display scaling: the displayed pixels must exactly match a single resam
 `tests/test_gui_smoke.py` checks the scaling selector and other screen controls.
 `tests/test_rfb.py` validates the RFB client against a fake VNC server;
 `tests/test_vm_lifecycle.py` runs create → start → QMP → VNC → stop →
-delete against real QEMU (skipped if QEMU is not installed).
+delete against real QEMU and verifies that the SFTP listener goes away on stop and comes back on
+its original port (skipped if QEMU is not installed). `tests/test_file_access.py` covers opt-in,
+port conflicts, first-boot key provisioning, the Dolphin launch and the copy-address fallback.
 
 ## Design notes
 

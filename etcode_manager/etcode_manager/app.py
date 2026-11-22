@@ -1,11 +1,13 @@
-"""Main window: VM list, lifecycle actions and the remote screen."""
+"""Main window: VM list, lifecycle actions, guest files and the remote screen."""
 
 from __future__ import annotations
 
 import html
+import shutil
+import sys
 
-from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QTimer, QSize, QProcess, QUrl
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QMessageBox, QSplitter,
@@ -15,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from .config import (
     DEFAULT_BACKEND_URL, Settings, detect_accel, normalize_backend_token, normalize_backend_url,
-    normalize_scaling, save_settings,
+    normalize_scaling, normalize_ssh_public_key, save_settings,
 )
 from .vm import VM, VMManager, VMError
 from .view import VncView
@@ -23,7 +25,7 @@ from .scaling import ScalingFilter
 
 
 class NewVMDialog(QDialog):
-    """Collects name, resources and the backend settings for a new VM.
+    """Collects name, resources, file access and the backend settings for a new VM.
 
     The backend URL and token are what the etcode desktop app inside the VM will use. They are prefilled with the
     defaults from ``config.local.json`` and can be changed per VM (for example to give one VM its own token).
@@ -55,6 +57,10 @@ class NewVMDialog(QDialog):
         self.disk.setValue(32)
         self.disk.setSuffix(" GB")
         form.addRow("Disk:", self.disk)
+
+        self.file_access = QCheckBox("Enable SFTP file access from the host")
+        self.file_access.setToolTip("Requires an SSH public key in the manager's Settings.")
+        form.addRow("File access:", self.file_access)
 
         self.backend_url_edit = QLineEdit(backend_url)
         self.backend_url_edit.setObjectName("backendUrl")
@@ -126,7 +132,7 @@ class NewVMDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """Edits the defaults that apply to every VM created from now on, and the screen scaling default.
+    """Edits the backend and SSH defaults for new VMs, and the screen scaling default.
 
     The backend token is the same secret that each VM receives (in its ``vm.json`` and cloud-init seed). It is
     shown masked by default. Saving writes ``config.local.json`` privately, because that file now holds the token.
@@ -138,6 +144,7 @@ class SettingsDialog(QDialog):
         backend_url: str = DEFAULT_BACKEND_URL,
         backend_token: str = "",
         scaling: ScalingFilter | str = ScalingFilter.AREA,
+        ssh_public_key: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -180,6 +187,11 @@ class SettingsDialog(QDialog):
         )
         form.addRow("", self.show_token)
 
+        self.ssh_key_edit = QLineEdit(ssh_public_key)
+        self.ssh_key_edit.setPlaceholderText("Paste the contents of your .pub file")
+        self.ssh_key_edit.setToolTip("New VMs authorize this key for the agent user. Keep the private key on the host.")
+        form.addRow("SSH public key:", self.ssh_key_edit)
+
         self.scaling_combo = QComboBox()
         self.scaling_combo.setObjectName("defaultScaling")
         self.scaling_combo.addItem("Smooth (area)", ScalingFilter.AREA)
@@ -211,6 +223,7 @@ class SettingsDialog(QDialog):
         """Close only if every value is valid; otherwise keep the dialog open and explain why."""
         try:
             self.values()
+            self.ssh_public_key()
         except ValueError as exc:
             self.error_label.setText(str(exc))
             self.error_label.show()
@@ -224,6 +237,9 @@ class SettingsDialog(QDialog):
             normalize_backend_token(self.token_edit.text()),
             ScalingFilter(self.scaling_combo.currentData()),
         )
+
+    def ssh_public_key(self) -> str:
+        return normalize_ssh_public_key(self.ssh_key_edit.text())
 
     # A descriptive alias; there are several defaults, and callers read better with it.
     def defaults(self) -> tuple[str, str, ScalingFilter]:
@@ -249,6 +265,14 @@ class MainWindow(QMainWindow):
         self.act_stop.triggered.connect(self.on_stop)
         self.act_delete = QAction("Delete", self)
         self.act_delete.triggered.connect(self.on_delete)
+        self.act_file_access = QAction("Enable File Access", self)
+        self.act_file_access.setCheckable(True)
+        self.act_file_access.setToolTip("Opt into SFTP for the selected VM. Stop the VM before changing this setting.")
+        self.act_file_access.triggered.connect(self.on_file_access)
+        self.act_open_files = QAction("Open VM Files", self)
+        self.act_open_files.triggered.connect(self.on_open_files)
+        self.act_copy_sftp = QAction("Copy SFTP Address", self)
+        self.act_copy_sftp.triggered.connect(self.on_copy_sftp)
         self.act_settings = QAction("Settings…", self)
         self.act_settings.setShortcut("Ctrl+,")
         self.act_settings.triggered.connect(self.on_settings)
@@ -256,6 +280,9 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar("VM")
         toolbar.setMovable(False)
         for action in (self.act_new, self.act_start, self.act_stop, self.act_delete):
+            toolbar.addAction(action)
+        toolbar.addSeparator()
+        for action in (self.act_file_access, self.act_open_files, self.act_copy_sftp):
             toolbar.addAction(action)
         toolbar.addSeparator()
         toolbar.addAction(self.act_settings)
@@ -382,22 +409,28 @@ class MainWindow(QMainWindow):
 
     def update_info(self) -> None:
         vm = self._current
+        running = vm is not None and vm.status == "running"
+        file_access = vm is not None and vm.ssh_port != 0
+        self.act_start.setEnabled(vm is not None and not running)
+        self.act_stop.setEnabled(running)
+        self.act_delete.setEnabled(vm is not None and not running)
+        self.act_file_access.setEnabled(vm is not None and not running)
+        self.act_file_access.setChecked(file_access)
+        self.act_open_files.setEnabled(running and file_access)
+        self.act_copy_sftp.setEnabled(running and file_access)
+        self.btn_connect.setEnabled(running)
+        self.btn_disconnect.setEnabled(self.screen.is_connected)
         if vm is None:
             self.info.setText("No VM selected")
             return
         self.info.setText(
             f"<b>{vm.name}</b> — {vm.status} — {vm.cpus} vCPU, "
             f"{vm.memory_mb} MB RAM, {vm.disk_gb} GB disk"
-            + (f" — VNC port {vm.vnc_port}" if vm.status == "running" else "")
+            + (f" — VNC port {vm.vnc_port}" if running else "")
+            + (f" — SFTP port {vm.ssh_port}" if file_access else "")
             + (f"<br>Backend: {html.escape(vm.backend_url)}"
                f" ({'token set' if vm.backend_token else 'no token'})" if vm.backend_url else "")
         )
-        running = vm.status == "running"
-        self.act_start.setEnabled(not running)
-        self.act_stop.setEnabled(running)
-        self.act_delete.setEnabled(not running)
-        self.btn_connect.setEnabled(running)
-        self.btn_disconnect.setEnabled(self.screen.is_connected)
 
     def selected_vm(self) -> VM | None:
         return self._current
@@ -427,6 +460,7 @@ class MainWindow(QMainWindow):
             vm = self.manager.create(
                 name, cpus=cpus, memory_mb=memory, disk_gb=disk,
                 backend_url=backend_url, backend_token=backend_token,
+                file_access=dialog.file_access.isChecked(),
             )
         except VMError as exc:
             QMessageBox.warning(self, "Cannot create VM", str(exc))
@@ -442,11 +476,14 @@ class MainWindow(QMainWindow):
             backend_url=self.settings.backend_url,
             backend_token=self.settings.backend_token,
             scaling=self.settings.scaling_filter,
+            ssh_public_key=self.settings.ssh_public_key,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         backend_url, backend_token, scaling = dialog.values()
-        previous = (self.settings.backend_url, self.settings.backend_token, self.settings.scaling)
+        previous = (self.settings.backend_url, self.settings.backend_token,
+                    self.settings.scaling, self.settings.ssh_public_key)
+        self.settings.ssh_public_key = dialog.ssh_public_key()
         self.settings.backend_url = backend_url
         self.settings.backend_token = backend_token
         self.settings.scaling_filter = scaling
@@ -454,7 +491,8 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
         except (RuntimeError, OSError, ValueError) as exc:
             # Keep the in-memory defaults consistent with what is actually on disk.
-            self.settings.backend_url, self.settings.backend_token, self.settings.scaling = previous
+            (self.settings.backend_url, self.settings.backend_token,
+             self.settings.scaling, self.settings.ssh_public_key) = previous
             self._select_scaling(self.settings.scaling_filter)
             QMessageBox.warning(self, "Cannot save settings", str(exc))
             return
@@ -508,6 +546,52 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot delete VM", str(exc))
         self._current = None
         self.refresh()
+
+    # -- file access --------------------------------------------------------
+
+    def on_file_access(self, enabled: bool) -> None:
+        vm = self.selected_vm()
+        if vm is None:
+            return
+        try:
+            self.manager.set_file_access(vm, enabled)
+        except VMError as exc:
+            QMessageBox.warning(self, "Cannot change file access", str(exc))
+        else:
+            message = ("Start the VM to open its files. The guest must authorize your SSH public key."
+                       if enabled else "File access disabled.")
+            self.statusBar().showMessage(message, 8000)
+        self.refresh()
+
+    def _running_sftp_url(self) -> str | None:
+        vm = self.selected_vm()
+        if vm is not None and vm.ssh_port and self.manager.is_running(vm):
+            return vm.sftp_url
+        self.refresh()
+        return None
+
+    def on_open_files(self) -> None:
+        url = self._running_sftp_url()
+        if url is None:
+            return
+        dolphin = shutil.which("dolphin") if sys.platform.startswith("linux") else None
+        if dolphin:
+            # Open inside Dolphin even when a different app is registered for sftp://.
+            opened, _ = QProcess.startDetached(dolphin, [url])
+        else:
+            opened = QDesktopServices.openUrl(QUrl(url))
+        if not opened:
+            QMessageBox.information(
+                self, "Cannot open VM files",
+                "Use Copy SFTP Address and paste it into an SFTP client, such as Dolphin "
+                "(with kio-extras on Fedora) or WinSCP on Windows.",
+            )
+
+    def on_copy_sftp(self) -> None:
+        url = self._running_sftp_url()
+        if url is not None:
+            QApplication.clipboard().setText(url)
+            self.statusBar().showMessage("SFTP address copied", 5000)
 
     # -- remote screen ------------------------------------------------------
 

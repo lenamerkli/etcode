@@ -14,14 +14,16 @@ mode 0600. A key in ``config.local.json`` wins over the same key in ``config.jso
 ``backend_url`` and ``backend_token`` in ``config.local.json`` are the defaults for the etcode backend that the
 desktop app inside a VM talks to. They are copied into each new VM (``vm.json`` and the cloud-init seed).
 
-``scaling`` selects the default screen filter for new manager windows (``area`` or ``lanczos``). The same
-values can be changed from the manager's Settings dialog, which writes them back to ``config.local.json``.
+``ssh_public_key`` authorizes the host's SSH key in new VMs. ``scaling`` selects the default screen filter
+for new manager windows (``area`` or ``lanczos``). These values can be changed from the manager's Settings
+dialog, which writes them back to ``config.local.json``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -92,6 +94,18 @@ def normalize_backend_token(value: object) -> str:
     if any(ord(c) < 33 or ord(c) > 126 for c in value):
         raise ValueError("The token contains spaces or characters that are not allowed in an HTTP header.")
     return value
+
+
+_SSH_PUBLIC_KEY_RE = re.compile(r"(?:ssh|ecdsa|sk)-[\w@.+-]+[ \t]+[A-Za-z0-9+/]+={0,2}(?:[ \t]+[^\r\n]*)?")
+
+
+def normalize_ssh_public_key(value: object) -> str:
+    """Accept a blank value or a single OpenSSH .pub line, never a private key."""
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or _SSH_PUBLIC_KEY_RE.fullmatch(value):
+            return value
+    raise ValueError("Paste one OpenSSH public key (.pub), not a private key.")
 
 
 def normalize_scaling(value: object) -> str:
@@ -237,6 +251,10 @@ def load_settings() -> Settings:
     except ValueError as exc:  # the message never contains the token
         raise RuntimeError(f"Invalid backend_token in {source('backend_token')}: {exc}") from exc
     try:
+        ssh_public_key = normalize_ssh_public_key(cfg.get("ssh_public_key", ""))
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid ssh_public_key in {source('ssh_public_key')}: {exc}") from exc
+    try:
         # ``scaling_filter`` is the historical/descriptive alias; ``scaling`` wins when both exist.
         scaling = normalize_scaling(cfg.get("scaling", cfg.get("scaling_filter", DEFAULT_SCALING)))
     except ValueError as exc:
@@ -247,7 +265,7 @@ def load_settings() -> Settings:
         vms_dir=Path(cfg.get("vms_dir", DEFAULT_VMS_DIR)).expanduser().resolve(),
         qemu_system=_find_tool("qemu-system-x86_64", "qemu-system-x86_64.exe"),
         qemu_img=_find_tool("qemu-img", "qemu-img.exe"),
-        ssh_public_key=str(cfg.get("ssh_public_key", "")).strip(),
+        ssh_public_key=ssh_public_key,
         backend_url=backend_url,
         backend_token=backend_token,
         scaling=scaling,
@@ -259,8 +277,8 @@ def load_settings() -> Settings:
 def save_settings(settings: Settings, path: Path | None = None) -> Path:
     """Persist the user-editable defaults to the git-ignored ``config.local.json`` and return the file path.
 
-    The backend URL/token and the scaling default are written; every other key that is already in the file
-    (``vms_dir``, custom keys, ...) is kept. Any key except ``base_image`` that the tracked ``config.json``
+    The backend URL/token, SSH public key and scaling default are written; other keys already in the file
+    (``vms_dir``, custom keys, ...) are kept. Any key except ``base_image`` that the tracked ``config.json``
     still holds is moved here too (values already present win), so the tracked file converges to the one key
     that belongs in version control and no secret stays tracked. The file can contain a token, so it is
     written atomically with mode 0600, just like ``vm.json`` and the seed ISO.
@@ -270,6 +288,11 @@ def save_settings(settings: Settings, path: Path | None = None) -> Path:
 
     data["backend_url"] = normalize_backend_url(settings.backend_url)
     data["backend_token"] = normalize_backend_token(settings.backend_token)
+    ssh_public_key = normalize_ssh_public_key(settings.ssh_public_key)
+    if ssh_public_key:
+        data["ssh_public_key"] = ssh_public_key
+    else:
+        data.pop("ssh_public_key", None)
     data["scaling"] = normalize_scaling(settings.scaling)
     data.pop("scaling_filter", None)  # the alias is read for compatibility; write only the canonical key
 
@@ -280,7 +303,7 @@ def save_settings(settings: Settings, path: Path | None = None) -> Path:
     for key, value in tracked.items():
         if key == "base_image":
             pruned[key] = value
-        elif key != "scaling_filter":  # the alias is superseded by the canonical key written above
+        elif key not in ("scaling_filter", "ssh_public_key"):  # the alias and edited SSH key are handled above
             data.setdefault(key, value)
 
     _write_config(path, data)

@@ -95,7 +95,10 @@ class QMPClient:
 
     def _read_message(self) -> dict:
         assert self._rfile is not None
-        line = self._rfile.readline()
+        try:
+            line = self._rfile.readline()
+        except OSError as exc:
+            raise QMPError(f"receive failed: {exc}") from exc
         if not line:
             raise QMPError("connection closed by QEMU")
         return json.loads(line.decode("utf-8"))

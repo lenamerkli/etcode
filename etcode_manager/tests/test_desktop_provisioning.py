@@ -338,7 +338,8 @@ class NewVMDialogTest(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
         from etcode_manager import app as app_module
         with tempfile.TemporaryDirectory() as tmp:
-            manager = make_manager(tmp, backend_url="http://10.0.2.2:9000", backend_token="tok")
+            manager = make_manager(tmp, backend_url="http://10.0.2.2:9000", backend_token="tok",
+                                   ssh_public_key="ssh-ed25519 AAAA test@host")
             window = app_module.MainWindow(manager.settings, manager)
             try:
                 seen = {}
@@ -349,6 +350,7 @@ class NewVMDialogTest(unittest.TestCase):
                         seen.update(kwargs)
                         self.name_edit.setText("vm-x")
                         self.token_edit.setText("changed")
+                        self.file_access.setChecked(True)
 
                     def exec(self):
                         return QDialog.DialogCode.Accepted
@@ -359,6 +361,7 @@ class NewVMDialogTest(unittest.TestCase):
                 self.assertEqual(seen, {"backend_url": "http://10.0.2.2:9000", "backend_token": "tok"})
                 (vm,) = manager.list()
                 self.assertEqual((vm.name, vm.backend_url, vm.backend_token), ("vm-x", "http://10.0.2.2:9000", "changed"))
+                self.assertIsNotNone(vm.sftp_url)
                 window.refresh()
                 self.assertIn("token set", window.info.text())
                 self.assertNotIn("changed", window.info.text())
