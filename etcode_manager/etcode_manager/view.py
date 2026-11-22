@@ -11,12 +11,15 @@ changes are marshalled to the GUI thread through queued signals.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QSize, QPointF
-from PySide6.QtGui import QImage, QPainter, QColor, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtCore import QEvent, Qt, Signal, QSize, QPointF
+from PySide6.QtGui import (
+    QGuiApplication, QImage, QPainter, QColor, QFocusEvent, QKeyEvent, QMouseEvent, QWheelEvent,
+)
 from PySide6.QtWidgets import QWidget
 
 from .keysyms import key_event_to_keysym
 from .rfb import RFBClient, RFBError
+from .scancodes import native_scan_to_qnum
 from .scaling import ScalingFilter, fitted_rect, resample_frame
 
 
@@ -32,6 +35,7 @@ class VncView(QWidget):
     def __init__(self, parent=None, scaling_filter: ScalingFilter | str = ScalingFilter.AREA):
         super().__init__(parent)
         self._client: RFBClient | None = None
+        self._pressed_keys: dict[tuple[bool, int], tuple[int, int | None]] = {}
         self._image: QImage | None = None
         self._button_mask = 0
         self._pointer = (0, 0)     # last known framebuffer coords
@@ -41,6 +45,8 @@ class VncView(QWidget):
         self._scaled_key: tuple | None = None
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Let the guest handle dead keys and compose, not the host input method.
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         self.setMouseTracking(True)  # Forward pointer motion even without a pressed button.
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(QSize(640, 400))
@@ -66,6 +72,7 @@ class VncView(QWidget):
         self.update()
 
     def disconnect_from(self) -> None:
+        self._release_keys()
         client, self._client = self._client, None
         if client is not None:
             client.close()
@@ -201,6 +208,37 @@ class VncView(QWidget):
         self._client.send_pointer(button, *self._pointer)
         self._client.send_pointer(0, *self._pointer)
 
+    def event(self, event: QEvent) -> bool:
+        if (event.type() == QEvent.Type.ShortcutOverride
+                and self._client is not None and self._client.ready):
+            event.accept()  # don't let manager shortcuts consume guest key presses
+            return True
+        return super().event(event)
+
+    def focusNextPrevChild(self, next: bool) -> bool:
+        # QWidget otherwise consumes Tab/Backtab for its own focus traversal.
+        if self._client is not None and self._client.ready:
+            return False
+        return super().focusNextPrevChild(next)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:
+        self._release_keys()
+        super().focusOutEvent(event)
+
+    def _release_keys(self) -> None:
+        client = self._client
+        if client is not None:
+            for keysym, keycode in reversed(self._pressed_keys.values()):
+                self._send_key(client, keysym, keycode, False)
+        self._pressed_keys.clear()
+
+    @staticmethod
+    def _send_key(client: RFBClient, keysym: int, keycode: int | None, down: bool) -> None:
+        if keycode is None:
+            client.send_key(keysym, down)
+        else:
+            client.send_extended_key(keysym, keycode, down)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         self._key_event(event, down=True)
 
@@ -208,11 +246,36 @@ class VncView(QWidget):
         self._key_event(event, down=False)
 
     def _key_event(self, event: QKeyEvent, down: bool) -> None:
-        if self._client is None:
-            return
-        keysym = key_event_to_keysym(event)
-        if keysym is not None:
-            self._client.send_key(keysym, down)
-            event.accept()
-        else:
+        client = self._client
+        if client is None or not client.ready:
             event.ignore()
+            return
+
+        # Qt's logical key and text can both change when a modifier is released.
+        # Pair each release with the same packet format and code as the press,
+        # even if negotiation just finished.
+        scan = event.nativeScanCode()
+        identity = (bool(scan), scan or int(event.key()))
+        if event.isAutoRepeat() and not down:
+            event.accept()  # Qt may generate a release/press pair for autorepeat
+            return
+        if down:
+            pressed = self._pressed_keys.get(identity)
+            if pressed is None and not event.isAutoRepeat():
+                platform = QGuiApplication.platformName()
+                keycode = native_scan_to_qnum(platform, scan) if client.supports_extended_keys else None
+                keysym = None
+                if keycode is not None and (platform == "xcb" or platform.startswith("wayland")):
+                    # Qt passes the XKB keysym here, including keypad and dead keys.
+                    keysym = event.nativeVirtualKey()
+                keysym = keysym or key_event_to_keysym(event)
+                if keycode is not None or keysym is not None:
+                    pressed = self._pressed_keys[identity] = (keysym or 0, keycode)
+        else:
+            pressed = self._pressed_keys.pop(identity, None)
+
+        if pressed is None:
+            event.ignore()
+        else:
+            self._send_key(client, *pressed, down)
+            event.accept()

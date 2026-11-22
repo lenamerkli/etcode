@@ -58,7 +58,7 @@ def card_text(pane, index, call_id):
 def type_and_send(pane, text):
     pane.composer.edit.setFocus()
     QTest.keyClicks(pane.composer.edit, text)
-    QTest.keyClick(pane.composer.edit, Qt.Key.Key_Return)
+    QTest.keyClick(pane.composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
 
 
 def settled(pane, fake, session):

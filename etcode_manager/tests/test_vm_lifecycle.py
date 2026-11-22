@@ -163,9 +163,10 @@ class VMLifecycleTest(unittest.TestCase):
             self.assertEqual((w, h), connected["size"])
             self.assertGreater(len(fb), 0)
 
-            # mouse + keyboard input goes through without error
-            c.send_key(0x61, True)
-            c.send_key(0x61, False)
+            # The real QEMU server advertises raw keyboard input.
+            self.assertTrue(c.supports_extended_keys)
+            c.send_extended_key(0x61, 0x1e, True)
+            c.send_extended_key(0x61, 0x1e, False)
             c.send_pointer(0x01, 5, 5)
             c.send_pointer(0x00, 5, 5)
             c.close()

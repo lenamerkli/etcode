@@ -1,0 +1,5 @@
+# German (Switzerland), standard layout with dead keys. Do not change the locale.
+XKBMODEL="pc105"
+XKBLAYOUT="ch"
+XKBVARIANT=""
+XKBOPTIONS=""

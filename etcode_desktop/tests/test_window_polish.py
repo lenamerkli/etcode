@@ -92,7 +92,7 @@ def test_every_shortcut_in_the_help_window_exists(env, qapp, fake):
     window, bridge, _ = env.open()
     assigned = {a.shortcut().toString() for a in window.findChildren(QAction) if not a.shortcut().isEmpty()}
     for keys, what in SHORTCUTS:
-        if "+" in keys and keys not in ("Ctrl+Enter", "Shift+Enter"):  # those two belong to the message box
+        if "+" in keys and keys != "Ctrl+Enter":  # handled directly by the message box
             assert keys in assigned, f"{keys} ({what}) is listed but nothing has it"
     assert len({keys for keys, _ in SHORTCUTS}) == len(SHORTCUTS)
 

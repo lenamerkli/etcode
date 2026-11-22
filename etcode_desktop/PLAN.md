@@ -354,7 +354,7 @@ Layout (single window, about 1100x750, remembers geometry, opens maximized on au
 │            │   ┌ tool: read_file ─ a.py ─ ⟳      ┐         │
 │            ├───────────────────────────────────────────────┤
 │            │ [model ▾] [web ☐] [effort ▾] [⚙]              │
-│            │ composer (Enter=send, Shift+Enter=newline)    │
+│            │ composer (Ctrl+Enter=send, Enter=newline )    │
 │            │ [📎 image]                    [Stop] [Send]   │
 ├────────────┴───────────────────────────────────────────────┤
 │ ● connected http://10.0.2.2:8765 │ session: generating │ $0.0123 │
@@ -364,7 +364,7 @@ Layout (single window, about 1100x750, remembers geometry, opens maximized on au
 * **Sidebar**: sessions sorted by last activity (the server's `updated_at`). A status dot (idle, generating, awaiting_tools, failed, missing) comes from the merged list (section 5.3), and no per-session polling is needed when the backend supports `GET /sessions`. Context menu: rename, copy id, remove from list. Without the list endpoint, the client falls back to `GET /session/<id>` per visible session every 30 s, skipping sessions the controller is already following.
 * **Transcript**: one widget per message, not one giant document. This keeps streaming updates cheap. Assistant text is rendered with `setMarkdown`. Reasoning is a collapsed block, streaming live. Tool calls are cards: header (tool name, short argument summary, spinner or exit status and duration) and an expandable body (arguments and output in monospace, truncated in the UI, with the full text on "Show all"). Tool results are attached to their card, matched by `tool_call_id`, and are not shown as separate messages. Images are shown as thumbnails (click to enlarge). Messages loaded from history use the same renderer as live ones.
 * **Streaming performance**: buffer deltas and flush to the widget on a 50 ms `QTimer`. Re-render markdown only for the message being streamed. Auto-scroll only if the user is already at the bottom, otherwise show a "jump to latest" button.
-* **Composer**: multi-line, Enter to send, Shift+Enter for a new line. Paste or drag-and-drop images (PNG/JPEG/WebP/GIF, with a size check before upload). While the session is busy, the Send button changes to "Queue", matching the backend's queued-message semantics.
+* **Composer**: multi-line, Ctrl+Enter to send, Enter for a new line. Paste or drag-and-drop images (PNG/JPEG/WebP/GIF, with a size check before upload). While the session is busy, the Send button changes to "Queue", matching the backend's queued-message semantics.
 * **Connection settings dialog** (menu and the gear button): backend URL, token (password field), "Test connection" (calls `GET /models`), and a "Reset to provisioned values" button that deletes the GUI overrides. It shows where each value currently comes from ("provisioned by manager" or "set in the GUI"). `GET /models` also fills the model picker. Models with `available: false` are shown disabled with a tooltip. If no token exists at all (a VM created before the manager provided one), the dialog opens on startup.
 * **Status bar**: connection state, session status, and the session cost from `cost.total_exact`. Show "≥ $x (n unpriced)" if `unpriced_generations > 0`, since the total is then only a lower bound.
 * **Keyboard**: Ctrl+N new session, Ctrl+Enter send, Esc stop, Ctrl+K focus the session list.

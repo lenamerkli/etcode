@@ -89,6 +89,9 @@ chown -R "$USERNAME:$USERNAME" /home/agent /opt/etcode
 # ---------------------------------------------------------------------------
 # Desktop: autologin (the user has no password) + graphical boot
 # ---------------------------------------------------------------------------
+log "configuring Swiss German keyboard layout"
+install -m 0644 "$STAGING/etc/default/keyboard" /etc/default/keyboard
+
 log "configuring display manager"
 install -d -m 0755 /etc/lightdm/lightdm.conf.d
 install -m 0644 \

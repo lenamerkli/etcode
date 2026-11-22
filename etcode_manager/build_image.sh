@@ -68,7 +68,7 @@ GUEST_PACKAGES=(
     cloud-init cloud-guest-utils openssh-server ca-certificates git
     python3 python3-venv
     # SETTINGS.md: desktop
-    xorg lightdm lightdm-gtk-greeter xfce4 xfce4-whiskermenu-plugin
+    xorg lightdm lightdm-gtk-greeter xfce4 xfce4-whiskermenu-plugin keyboard-configuration
     # keeps the display on (used by provision/etcode-no-blank.desktop)
     x11-xserver-utils
     # Window listing, input and screenshots for the guest desktop tool
@@ -199,6 +199,7 @@ stage_payload() {
     mkdir -p \
         "$STAGING_DIR/home/agent/.config/xfce4/xfconf/xfce-perchannel-xml" \
         "$STAGING_DIR/opt" \
+        "$STAGING_DIR/etc/default" \
         "$STAGING_DIR/etc/sudoers.d" \
         "$STAGING_DIR/etc/lightdm/lightdm.conf.d"
 
@@ -216,6 +217,9 @@ stage_payload() {
     # launcher item .desktop files referenced by the panel config
     cp -a "$SCRIPT_DIR/provision/panel" \
         "$STAGING_DIR/home/agent/.config/xfce4/panel"
+
+    # System keyboard layout for Xorg/Xfce, independent of the display language.
+    install -m 0644 "$SCRIPT_DIR/provision/keyboard" "$STAGING_DIR/etc/default/keyboard"
 
     # passwordless sudo for agent
     cp -a "$SCRIPT_DIR/provision/sudoers-agent" "$STAGING_DIR/etc/sudoers.d/agent"

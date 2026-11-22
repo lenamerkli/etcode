@@ -49,7 +49,7 @@ in the manager does not reach a VM that has already booted: change it in the con
 Open a session in the sidebar. Its history is loaded, and if the backend is working on it, the stream is
 joined where it is. Sessions you opened keep working in the background while you look at another one.
 
-* **Enter** sends, **Shift+Enter** adds a line, **Esc** or the Stop button stops the model. While the model
+* **Ctrl+Enter** sends, **Enter** adds a line, **Esc** or the Stop button stops the model. While the model
   works the button says **Queue**: the backend commits the message when the current work is done.
 * The view follows the text as it streams, unless you scrolled up. A "Jump to latest" button appears then.
 * A message that could not be sent stays in the conversation, marked "not sent". If the connection broke
@@ -134,6 +134,8 @@ can immediately read the finished export.
 
 ## Using the window
 
+* **Message box.** Drag the grip just above the text input up or down to change its height. Double-click the grip
+  to return to automatic sizing.
 * **Pictures.** Attach a picture with the **📎 Picture** button, paste one (Ctrl+V), or drop a file on the message
   box. PNG, JPEG, WebP and GIF up to 20 MiB, up to 10 per message, checked by their content (not their name)
   before anything is uploaded. Small chips show what will be sent, and each can be removed. The button is off when the
@@ -156,7 +158,7 @@ can immediately read the finished export.
   all, and is offered when the backend refuses the token. Changing the address or token switches to the sessions of the
   new token: the others are kept, but not shown. An `http://` address beyond the private network gets a warning.
 * **Keyboard.** Ctrl+N new session, Ctrl+K go to the list of sessions, Ctrl+L go to the message box, Ctrl+End jump to the
-  latest message, Enter / Ctrl+Enter send, Shift+Enter new line, Esc stop, Ctrl+, connection settings, Ctrl+Q quit
+  latest message, Ctrl+Enter send, Enter new line, Esc stop, Ctrl+, connection settings, Ctrl+Q quit
   (also under **Help ▸ Keyboard shortcuts**). The window title names the session that is shown.
 
 ## When things go wrong

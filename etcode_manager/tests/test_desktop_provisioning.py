@@ -382,6 +382,15 @@ class ImageFilesTest(unittest.TestCase):
                 result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_default_keyboard_is_swiss_german_with_dead_keys(self):
+        keyboard = (MANAGER / "provision" / "keyboard").read_text()
+        self.assertIn('XKBMODEL="pc105"', keyboard)
+        self.assertIn('XKBLAYOUT="ch"', keyboard)
+        self.assertIn('XKBVARIANT=""', keyboard)
+        self.assertIn('keyboard-configuration', self.build)
+        self.assertIn('"$SCRIPT_DIR/provision/keyboard" "$STAGING_DIR/etc/default/keyboard"', self.build)
+        self.assertIn('"$STAGING/etc/default/keyboard" /etc/default/keyboard', self.provision)
+
     def test_packaging_files_exist_and_are_staged(self):
         packaging = DESKTOP / "packaging"
         for name in ("etcode-desktop", "etcode-desktop.desktop", "etcode-desktop-autostart.desktop", "etcode-desktop.svg"):

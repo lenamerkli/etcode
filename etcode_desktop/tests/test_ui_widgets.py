@@ -5,12 +5,13 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QUrl, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QUrl, Qt  # noqa: E402
 from PySide6.QtGui import QDesktopServices, QTextDocument  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QWidget  # noqa: E402
 
 from etcode_desktop.core import transcript as t  # noqa: E402
+from etcode_desktop.ui.chat_pane import ChatPane  # noqa: E402
 from etcode_desktop.ui.composer import MAX_LINES, Composer  # noqa: E402
 from etcode_desktop.ui.markdown_view import AutoHeightBrowser  # noqa: E402
 from etcode_desktop.ui.transcript_view import AssistantBlock, ToolCardWidget, TranscriptView, UserBlock  # noqa: E402
@@ -411,18 +412,23 @@ def type_text(composer, text):
     QTest.keyClicks(composer.edit, text)
 
 
-def test_enter_sends_the_text_trimmed(qapp, composer):
+def test_ctrl_enter_sends_the_text_trimmed(qapp, composer):
     type_text(composer, "  hello world  ")
-    QTest.keyClick(composer.edit, Qt.Key.Key_Return)
+    QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert composer.sent == ["hello world"]
     composer.set_text("via keypad")
-    QTest.keyClick(composer.edit, Qt.Key.Key_Enter)
+    QTest.keyClick(composer.edit, Qt.Key.Key_Enter,
+                   Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.KeypadModifier)
     assert composer.sent[-1] == "via keypad"
 
 
-def test_shift_enter_adds_a_line_and_ctrl_enter_sends(qapp, composer):
+@pytest.mark.parametrize(("key", "modifiers"), [
+    (Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier),
+    (Qt.Key.Key_Enter, Qt.KeyboardModifier.KeypadModifier),
+])
+def test_enter_adds_a_line_and_ctrl_enter_sends(qapp, composer, key, modifiers):
     type_text(composer, "line one")
-    QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    QTest.keyClick(composer.edit, key, modifiers)
     type_text(composer, "line two")
     assert composer.sent == [] and composer.text() == "line one\nline two"
     QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
@@ -431,14 +437,14 @@ def test_shift_enter_adds_a_line_and_ctrl_enter_sends(qapp, composer):
 
 def test_the_text_stays_until_the_owner_clears_it(qapp, composer):
     type_text(composer, "keep me")
-    QTest.keyClick(composer.edit, Qt.Key.Key_Return)
+    QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert composer.text() == "keep me"  # clearing is the pane's job, after it took the text
     composer.clear()
     assert composer.text() == ""
 
 
 def test_empty_and_blank_text_is_not_sent(qapp, composer):
-    QTest.keyClick(composer.edit, Qt.Key.Key_Return)
+    QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     composer.set_text("   \n  ")  # (QTest.keyClicks cannot type a newline)
     composer.send_button.click()
     assert composer.sent == []
@@ -457,7 +463,7 @@ def test_busy_turns_send_into_queue_and_enables_stop(qapp, composer):
     composer.stop_button.click()
     assert composer.stops == [1]
     type_text(composer, "next question")
-    QTest.keyClick(composer.edit, Qt.Key.Key_Return)
+    QTest.keyClick(composer.edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert composer.sent == ["next question"]  # still possible while busy: it is queued by the backend
     composer.set_busy(False)
     assert composer.send_button.text() == "Send" and not composer.stop_button.isEnabled()
@@ -471,7 +477,7 @@ def test_sending_can_be_disallowed(qapp, composer):
     composer.send_button.click()
     assert composer.sent == []
     composer.set_sending_allowed(True)
-    assert composer.edit.isEnabled() and "Enter sends" in composer.edit.placeholderText()
+    assert composer.edit.isEnabled() and "Ctrl+Enter sends" in composer.edit.placeholderText()
 
 
 def test_the_edit_grows_with_its_text_up_to_a_limit(qapp, composer):
@@ -489,18 +495,60 @@ def test_the_edit_grows_with_its_text_up_to_a_limit(qapp, composer):
     assert big <= MAX_LINES * line + 30
 
 
-def test_the_edit_can_be_resized_by_the_user(qapp, composer):
+def drag_resize_handle(qapp, composer, dy):
+    handle = composer.resize_handle
+    window = handle.window()
+    start = handle.mapTo(window, handle.rect().center())
+    end = start + QPoint(0, dy)
+    # Use window coordinates: the handle follows the mouse when the composer grows or shrinks.
+    QTest.mousePress(window.windowHandle(), Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(window.windowHandle(), end)
+    QTest.mouseRelease(window.windowHandle(), Qt.MouseButton.LeftButton, pos=end)
+    pump(qapp)
+
+
+def test_the_resize_handle_can_shrink_a_long_draft_and_reset(qapp, composer):
+    composer.resize(500, 350)
     edit = composer.edit
+    small = edit.height()
+    draft = "line of text\n" * 20
+    composer.set_text(draft)
+    pump(qapp)
     auto = edit.height()
-    edit.set_user_height(auto + 200)
-    assert edit.height() == auto + 200
-    edit.set_user_height(1)  # never smaller than the minimum
-    assert edit.height() == auto
-    edit.set_user_height(10_000)  # never absurdly tall
-    assert edit.height() < 10_000
-    edit.set_user_height(None)
-    assert edit.height() == auto and edit.user_height is None
-    assert composer.resize_handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    line = edit.fontMetrics().lineSpacing()
+    handle = composer.resize_handle
+    assert handle.isVisible() and handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
+
+    drag_resize_handle(qapp, composer, -2 * line)
+    assert edit.height() == auto + 2 * line
+    drag_resize_handle(qapp, composer, 4 * line)
+    assert edit.height() == auto - 2 * line
+    drag_resize_handle(qapp, composer, 10 * line)
+    assert edit.height() == small
+    assert composer.text() == draft and edit.verticalScrollBar().maximum() > 0
+
+    composer.set_text(draft + "another line")
+    pump(qapp)
+    assert edit.height() == small  # manual sizing overrides auto-growth until reset
+    QTest.mouseDClick(handle, Qt.MouseButton.LeftButton, pos=handle.rect().center())
+    pump(qapp)
+    assert edit.height() == auto and composer.text() == draft + "another line"
+
+
+def test_resizing_the_composer_does_not_force_the_chat_window_taller(qapp):
+    pane = shown(ChatPane(), qapp, 700, 480)
+    original = pane.size()
+    small = pane.composer.edit.height()
+    drag_resize_handle(qapp, pane.composer, -original.height())
+    tall = pane.composer.edit.height()
+    assert tall > small and pane.size() == original
+    assert pane.transcript.height() >= pane.transcript.minimumSizeHint().height()
+
+    pane.resize(original.width(), original.height() - 120)
+    pump(qapp)
+    assert pane.height() == original.height() - 120
+    assert small < pane.composer.edit.height() < tall
+    assert pane.transcript.height() >= pane.transcript.minimumSizeHint().height()
 
 
 def test_composer_is_a_plain_widget(qapp):

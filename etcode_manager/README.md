@@ -17,8 +17,8 @@ needs **no guest-side remote-desktop server** such as xrdp or VNC.
 * **etcode desktop app in the VM** — the image contains the etcode desktop app (the
   GUI for the etcode backend), and it starts by itself when the VM's session starts. Each
   new VM gets the backend URL and access token through its cloud-init seed (see below).
-* **Mouse and keyboard input** — clicks, wheel and keys are forwarded to
-  the guest (X11 keysym translation included).
+* **Mouse and keyboard input** — clicks, wheel and physical keys are forwarded to
+  the guest. The active guest keyboard layout determines the typed characters.
 * **Open VM Files** — opt-in SFTP access to a running VM, directly in Dolphin on Fedora.
 
 For agent-driven Firefox or game testing, the guest desktop app also has an
@@ -40,6 +40,22 @@ at the new template; don't replace a base image that existing VM overlays depend
 ```bash
 python -m etcode_manager
 ```
+
+## Keyboard layout
+
+The viewer uses QEMU's Extended Key Event support to forward physical keys on Qt Wayland,
+X11 (`xcb` with evdev keycodes), and Windows. Newly built base images default to **German (Switzerland)**
+(`ch`, standard variant with dead keys), without changing the guest's display language.
+For matching text on both sides, use the same layout and variant in the host and guest. AltGr
+and dead-key sequences (for example, `^` then Space for a literal `^`, or `^` then `a` for `â`)
+are interpreted by the guest. Host-global shortcuts and host IME text aren't forwarded as keystrokes.
+
+In an existing VM, change the layout in **Xfce Settings → Keyboard → Layout**. If necessary, turn
+off **Use system defaults** and select **German (Switzerland)** (not **no dead keys**).
+For new VMs, rebuild with a fresh `IMAGE_VERSION` (for example, `IMAGE_VERSION=v10 ./build_image.sh`
+from this directory) and update `base_image` in `config.json`. Do not overwrite an image that existing
+VMs use. If the VNC server doesn't advertise the QEMU extension, the viewer falls back to legacy
+keysym events, which may not reproduce all layout-specific characters.
 
 ## Access guest files from the host
 
@@ -207,7 +223,8 @@ packaging files and panel layout fit together. `tests/test_settings.py` covers t
 cache invalidation and input mapping. It also checks actual offscreen painting in subprocesses at 100%, 125%, 150%
 and 200% display scaling: the displayed pixels must exactly match a single resampling of the original frame.
 `tests/test_gui_smoke.py` checks the scaling selector and other screen controls.
-`tests/test_rfb.py` validates the RFB client against a fake VNC server;
+`tests/test_keyboard.py` covers native scan codes, AltGr, dead-key forwarding and key release handling.
+`tests/test_rfb.py` validates the RFB client and extended-key negotiation against a fake VNC server;
 `tests/test_vm_lifecycle.py` runs create → start → QMP → VNC → stop →
 delete against real QEMU and verifies that the SFTP listener goes away on stop and comes back on
 its original port (skipped if QEMU is not installed). `tests/test_file_access.py` covers opt-in,

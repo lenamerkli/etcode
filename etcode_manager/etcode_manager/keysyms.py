@@ -1,10 +1,9 @@
-"""Qt key event -> X11 keysym translation for the RFB client.
+"""Translate Qt key events to X11 keysyms when no native keysym is available.
 
-For printable keys the character produced by the key event (``event.text()``)
-is the keysym, which gives correct behaviour for Shift/AltGr combinations.
+Use the logical character for printable keys, not for physical key identity.
 Non-printable keys (arrows, function keys, modifiers, ...) use the table
-below.  Control characters (e.g. Ctrl+A producing ``\\x01``) fall back to the
-base key so that Ctrl combos work.
+below. Control characters (e.g. Ctrl+A producing ``\\x01``) fall back to
+the base key so that Ctrl combos work.
 """
 
 from __future__ import annotations
@@ -77,6 +76,27 @@ SPECIAL_KEYSYMS = {
     Qt.Key.Key_Menu: XK_Menu,
 }
 
+# Preserve the keypad identity; QEMU uses the keysym to interpret Num Lock.
+KEYPAD_KEYSYMS = {
+    Qt.Key.Key_Home: 0xFF95,       # XK_KP_Home
+    Qt.Key.Key_Left: 0xFF96,
+    Qt.Key.Key_Up: 0xFF97,
+    Qt.Key.Key_Right: 0xFF98,
+    Qt.Key.Key_Down: 0xFF99,
+    Qt.Key.Key_PageUp: 0xFF9A,
+    Qt.Key.Key_PageDown: 0xFF9B,
+    Qt.Key.Key_End: 0xFF9C,
+    Qt.Key.Key_Clear: 0xFF9D,      # XK_KP_Begin
+    Qt.Key.Key_Insert: 0xFF9E,
+    Qt.Key.Key_Delete: 0xFF9F,
+    Qt.Key.Key_Asterisk: 0xFFAA,   # XK_KP_Multiply
+    Qt.Key.Key_Plus: 0xFFAB,
+    Qt.Key.Key_Minus: 0xFFAD,
+    Qt.Key.Key_Period: 0xFFAE,     # XK_KP_Decimal (localized as comma on some systems)
+    Qt.Key.Key_Comma: 0xFFAE,
+    Qt.Key.Key_Slash: 0xFFAF,
+}
+
 # Qt.Key_A .. Qt.Key_Z are contiguous, likewise Key_0 .. Key_9.
 _QT_KEY_A = int(Qt.Key.Key_A)
 _QT_KEY_Z = int(Qt.Key.Key_Z)
@@ -87,6 +107,11 @@ _QT_KEY_9 = int(Qt.Key.Key_9)
 def key_event_to_keysym(event: QKeyEvent) -> int | None:
     """Return the X11 keysym for a Qt key event, or None if unmappable."""
     key = event.key()
+    if event.modifiers() & Qt.KeyboardModifier.KeypadModifier:
+        if _QT_KEY_0 <= key <= _QT_KEY_9:
+            return 0xFFB0 + (key - _QT_KEY_0)  # XK_KP_0 .. XK_KP_9
+        if key in KEYPAD_KEYSYMS:
+            return KEYPAD_KEYSYMS[key]
     text = event.text()
 
     if text:

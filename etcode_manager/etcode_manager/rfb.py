@@ -3,8 +3,9 @@
 Connects to QEMU's built-in VNC server, decodes framebuffer updates and
 sends keyboard / pointer events.  No external dependencies.
 
-Supported: RFB 3.3 / 3.7 / 3.8, security type "None", raw encoding and the
-DesktopSize pseudo-encoding, 32 bpp true-colour (BGRX / QImage layout).
+Supported: RFB 3.3 / 3.7 / 3.8, security type "None", raw encoding,
+DesktopSize and QEMU Extended Key Event pseudo-encodings, 32 bpp
+true-colour (BGRX / QImage layout).
 This is deliberately minimal — it is exactly what QEMU's VNC server offers
 on a loopback socket, and it gives full screen + input control without
 changing the guest image (no xrdp/freeRDP/VNC server inside the VM).
@@ -18,6 +19,7 @@ import threading
 
 ENCODING_RAW = 0
 ENCODING_DESKTOP_SIZE = -223
+ENCODING_QEMU_EXTENDED_KEY_EVENT = -258
 
 PIXEL_FORMAT = struct.pack(
     ">BBBBHHHBBB3x",
@@ -72,6 +74,8 @@ class RFBClient:
         self._send_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._closing = False
+        self._ready = False
+        self._extended_keys = False  # set by the reader when QEMU acknowledges
 
         self.width = 0
         self.height = 0
@@ -92,26 +96,40 @@ class RFBClient:
 
     def close(self) -> None:
         self._closing = True
-        if self._sock is not None:
+        self._ready = False
+        sock, self._sock = self._sock, None
+        if sock is not None:
             try:
-                self._sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
             try:
-                self._sock.close()
+                sock.close()
             except OSError:
                 pass
-        self._sock = None
 
     @property
     def connected(self) -> bool:
         return self._sock is not None
+
+    @property
+    def ready(self) -> bool:
+        return self._ready and self.connected
+
+    @property
+    def supports_extended_keys(self) -> bool:
+        return self._extended_keys and self.ready
 
     # -- input --------------------------------------------------------------
 
     def send_key(self, keysym: int, down: bool) -> None:
         """Send a key event (X11 keysym, see keysyms.py)."""
         self._send(struct.pack(">BBHI", 4, 1 if down else 0, 0, keysym))
+
+    def send_extended_key(self, keysym: int, keycode: int, down: bool) -> None:
+        """Send a physical key event (QEMU's encoded XT make scancode)."""
+        if self.supports_extended_keys:
+            self._send(struct.pack(">BBHII", 255, 0, int(down), keysym, keycode))
 
     def send_pointer(self, button_mask: int, x: int, y: int) -> None:
         """Send a pointer event.
@@ -139,6 +157,7 @@ class RFBClient:
         reason = "connection closed"
         try:
             self._handshake()
+            self._ready = True
             if self._on_connected:
                 self._on_connected(self.width, self.height, self.name)
             self._request_update(incremental=False)
@@ -153,9 +172,12 @@ class RFBClient:
                 self._on_disconnect(reason if not self._closing else "disconnected")
 
     def _recv_exact(self, n: int) -> bytes:
+        sock = self._sock
+        if sock is None:
+            raise RFBError("connection closed")
         data = bytearray()
         while len(data) < n:
-            chunk = self._sock.recv(n - len(data))
+            chunk = sock.recv(n - len(data))
             if not chunk:
                 raise RFBError("connection closed by VNC server")
             data += chunk
@@ -202,9 +224,10 @@ class RFBClient:
         self.name = self._recv_exact(name_len).decode("utf-8", "replace")
         self._set_size(width, height)
 
-        # Our pixel format (BGRX, 32bpp) and encodings (raw + DesktopSize)
+        # Request the extension, but wait for the server's acknowledgement.
         self._send(b"\x00\x00\x00\x00" + PIXEL_FORMAT)
-        self._send(struct.pack(">BBH", 2, 0, 2) + struct.pack(">ii", ENCODING_RAW, ENCODING_DESKTOP_SIZE))
+        self._send(struct.pack(">BBHiii", 2, 0, 3, ENCODING_RAW, ENCODING_DESKTOP_SIZE,
+                               ENCODING_QEMU_EXTENDED_KEY_EVENT))
 
     def _set_size(self, width: int, height: int) -> None:
         self.width, self.height = width, height
@@ -220,6 +243,7 @@ class RFBClient:
                 self._recv_exact(1)  # padding
                 (n_rects,) = struct.unpack(">H", self._recv_exact(2))
                 rects = []
+                key_acks = 0
                 for _ in range(n_rects):
                     x, y, w, h, encoding = struct.unpack(">HHHHi", self._recv_exact(12))
                     if encoding == ENCODING_RAW:
@@ -235,11 +259,17 @@ class RFBClient:
                         self._set_size(w, h)
                         if self._on_resize:
                             self._on_resize(w, h)
+                    elif encoding == ENCODING_QEMU_EXTENDED_KEY_EVENT:
+                        self._extended_keys = True  # no payload, even if QEMU sets w/h
+                        key_acks += 1
                     else:
                         raise RFBError(f"unsupported encoding {encoding} (did the server honour SetEncodings?)")
                 if self._on_frame and rects:
                     self._on_frame(rects, self.width, self.height, bytes(self._fb))
-                self._request_update(incremental=True)
+                # A standalone acknowledgement responds to SetEncodings, not to
+                # a FramebufferUpdateRequest. Don't start a second update loop.
+                if not n_rects or key_acks != n_rects:
+                    self._request_update(incremental=True)
             elif msg_type == 1:  # SetColourMapEntries
                 self._recv_exact(3)
                 (first,) = struct.unpack(">H", self._recv_exact(2))

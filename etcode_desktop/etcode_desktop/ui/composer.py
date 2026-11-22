@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QMimeData, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent, QPaintEvent, QPainter
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
@@ -18,9 +18,9 @@ from .image_loader import pixmap_from_bytes
 
 MIN_LINES = 2
 MAX_LINES = 8
-MAX_USER_HEIGHT = 800  # pixels: the most the user can drag the box to
 CHIP_THUMBNAIL = QSize(40, 40)
 PROBLEM_SECONDS = 6
+MESSAGE_PLACEHOLDER = "Message… (Ctrl+Enter sends, Enter adds a line)"
 IMAGE_FILTER = "Pictures (*.png *.jpg *.jpeg *.webp *.gif);;All files (*)"
 
 
@@ -40,7 +40,7 @@ def png_bytes(image: QImage) -> bytes:
 
 
 class _Edit(QPlainTextEdit):
-    """Enter sends. Shift+Enter makes a new line. Ctrl+Enter sends as well. Pictures can be pasted or dropped."""
+    """Ctrl+Enter sends. Enter makes a new line. Pictures can be pasted or dropped."""
 
     submit = Signal()
     pictures_given = Signal(list)  # list of (name, bytes) or file paths: see Composer
@@ -48,13 +48,14 @@ class _Edit(QPlainTextEdit):
     def __init__(self) -> None:
         super().__init__()
         self.setTabChangesFocus(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Use the requested height when it fits, but let the layout shrink the box to keep the transcript visible.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._user_height: int | None = None  # set by dragging the handle above the box
-        self.document().documentLayout().documentSizeChanged.connect(self._fit)
-        self._fit()
+        self.document().documentLayout().documentSizeChanged.connect(self.updateGeometry)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+        modifiers = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and modifiers == Qt.KeyboardModifier.ControlModifier:
             self.submit.emit()
             return
         super().keyPressEvent(event)
@@ -85,30 +86,26 @@ class _Edit(QPlainTextEdit):
         margins = int(self.document().documentMargin() * 2) + 2 * self.frameWidth() + 2
         return lines * self.fontMetrics().lineSpacing() + margins
 
-    def _fit(self) -> None:
-        lines = min(max(int(self.document().size().height()), MIN_LINES), MAX_LINES)
-        height = self._lines_height(lines)
-        if self._user_height is not None:
-            height = max(height, self._user_height)
-        self.setFixedHeight(height)
-
     def set_user_height(self, height: int | None) -> None:
-        """The height chosen by the user (None: grow with the text again). The box still grows for longer text."""
+        """Choose a height, or return to automatic sizing with None."""
         if height is not None:
-            height = min(max(height, self._lines_height(MIN_LINES)), MAX_USER_HEIGHT)
-        self._user_height = height
-        self._fit()
+            height = max(height, self._lines_height(MIN_LINES))
+        if height != self._user_height:
+            self._user_height = height
+            self.updateGeometry()
 
-    @property
-    def user_height(self) -> int | None:
-        return self._user_height
+    def minimumSizeHint(self) -> QSize:
+        return QSize(super().minimumSizeHint().width(), self._lines_height(MIN_LINES))
 
     def sizeHint(self) -> QSize:
-        return QSize(200, self.height())
+        if self._user_height is not None:
+            return QSize(200, self._user_height)
+        lines = min(max(int(self.document().size().height()), MIN_LINES), MAX_LINES)
+        return QSize(200, self._lines_height(lines))
 
 
 class _ResizeHandle(QFrame):
-    """A thin bar above the text box: drag it up or down to make the box taller or shorter. Double-click resets."""
+    """A grip above the text box: drag it up or down to resize. Double-click to reset."""
 
     def __init__(self, edit: _Edit):
         super().__init__()
@@ -116,10 +113,21 @@ class _ResizeHandle(QFrame):
         self._start_y: float | None = None
         self._start_height = 0
         self.setObjectName("composerResizeHandle")
+        self.setAccessibleName("Resize message box")
         self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setFixedHeight(6)
-        self.setToolTip("Drag to resize the message box (double-click to reset)")
-        self.setStyleSheet("#composerResizeHandle { border-top: 1px solid palette(mid); margin: 0 40%; }")
+        self.setFixedHeight(10)
+        self.setToolTip("Drag up or down to resize the message box. Double-click for automatic sizing.")
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        # A visible grip in the center of the full-width drag target.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.palette().windowText())
+        painter.setOpacity(0.6)
+        width, height = 48, 4
+        painter.drawRoundedRect((self.width() - width) // 2, (self.height() - height) // 2, width, height, 2, 2)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -130,20 +138,27 @@ class _ResizeHandle(QFrame):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._start_y is not None:
-            # dragging up (smaller y) makes the box taller
-            self._edit.set_user_height(int(self._start_height + self._start_y - event.globalPosition().y()))
+        if self._start_y is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            # Use global coordinates because the handle itself moves. Dragging up makes the box taller.
+            self._edit.set_user_height(round(self._start_height + self._start_y - event.globalPosition().y()))
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        self._start_y = None
+        if event.button() == Qt.MouseButton.LeftButton and self._start_y is not None:
+            self._start_y = None
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        self._edit.set_user_height(None)
-        event.accept()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_y = None
+            self._edit.set_user_height(None)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class _Chip(QFrame):
@@ -187,7 +202,7 @@ class Composer(QWidget):
 
         self._edit = _Edit()
         self._edit.setObjectName("composerEdit")
-        self._edit.setPlaceholderText("Message… (Enter sends, Shift+Enter adds a line)")
+        self._edit.setPlaceholderText(MESSAGE_PLACEHOLDER)
         self._edit.submit.connect(self._submit)
         self._edit.pictures_given.connect(self._on_pictures_given)
         self._edit.textChanged.connect(self._update_send_enabled)
@@ -256,8 +271,7 @@ class Composer(QWidget):
         self._edit.setEnabled(allowed)
         self._send.setEnabled(allowed)
         self._attach.setEnabled(allowed and self._images_allowed)
-        self._edit.setPlaceholderText(reason if (reason and not allowed) else
-                                      "Message… (Enter sends, Shift+Enter adds a line)")
+        self._edit.setPlaceholderText(reason if (reason and not allowed) else MESSAGE_PLACEHOLDER)
 
     def set_images_allowed(self, allowed: bool, reason: str = "") -> None:
         """Whether the model of the session can look at pictures. If not, the attach button is off."""
