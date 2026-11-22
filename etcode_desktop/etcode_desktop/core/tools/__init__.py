@@ -18,6 +18,7 @@ from .cancel import CancelToken
 from .files import FileToolError, read_file, replace_in_file, resolve_path, write_to_file
 from .image import view_image
 from .interactive_terminal import TerminalManager
+from .save_messages import export_messages
 from .schemas import TOOL_NAMES, ToolArgumentError, explicit, validate_arguments
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ __all__ = ["CancelToken", "ToolContext", "execute_tool", "TOOL_NAMES", "error_te
 
 @dataclass
 class ToolContext:
-    client: BackendClient | None = None  # view_image uploads through it
+    client: BackendClient | None = None  # used by view_image and save_messages
     cancel: CancelToken = field(default_factory=CancelToken)
     home: Path = field(default_factory=Path.home)  # relative paths are relative to this
     terminal_manager: TerminalManager | None = None
@@ -87,6 +88,12 @@ def _run(name: str, args: dict[str, Any], given: dict[str, Any], context: ToolCo
         return [text_part(write_to_file(args["path"], args["content"], home))]
     if name == "replace_in_file":
         return [text_part(replace_in_file(args["path"], args["search"], args["replace"], bool(args.get("read", False)), home))]
+    if name == "save_messages":
+        if context.client is None or context.chat_id in ("", "direct"):
+            raise FileToolError("saving messages requires an active chat and a connection to the backend")
+        result = export_messages(args["directory"], client=context.client, session_id=context.chat_id,
+                                 home=home, cancel=context.cancel)
+        return [text_part(result)]
     if name == "view_image":
         if context.client is None:
             raise FileToolError("images cannot be uploaded: there is no connection to the backend")

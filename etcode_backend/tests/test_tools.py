@@ -1,5 +1,5 @@
 """The tool schemas that the backend advertises to the model."""
-from etcode_backend.tools import tool_names, tools_for
+from etcode_backend.tools import BACKEND_TOOLS, tool_names, tools_for
 
 
 def schema(name, websearch=True, images=True):
@@ -40,9 +40,17 @@ def test_read_file_parameter_descriptions_state_the_reading_rules():
 
 
 def test_client_tools_are_advertised():
-    client_tools = {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file"}
+    client_tools = {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "save_messages"}
     assert tool_names(tools_for(False, False)) == client_tools
     assert tool_names(tools_for(True, True)) == client_tools | {"websearch", "view_image"}
     assert schema("bash")["description"] == "Execute a bash shell command."
     assert set(schema("bash")["parameters"]["properties"]) == {"command", "timeout", "directory", "venv", "max_chars"}
     assert set(schema("replace_in_file")["parameters"]["properties"]) == {"path", "search", "replace", "read"}
+
+
+def test_save_messages_has_one_required_directory_and_runs_on_the_client():
+    assert "save_messages" not in BACKEND_TOOLS
+    parameters = schema("save_messages", websearch=False, images=False)["parameters"]
+    assert parameters["required"] == ["directory"]
+    assert set(parameters["properties"]) == {"directory"}
+    assert parameters["properties"]["directory"]["type"] == "string"

@@ -316,6 +316,41 @@ def test_calls_run_in_model_order_with_the_real_backend(real, harness, tmp_path)
     assert [e.message["tool_call_id"] for e in h.client.messages(h.session.id) if e.message["role"] == "tool"] == ["w", "r", "s1", "s2", "s3"]
 
 
+def test_save_messages_exports_committed_history_before_the_next_tool_runs(real, harness, tmp_path):
+    destination = tmp_path / "chat-export"
+    batch = [
+        ("pending", "bash", {"command": "echo pending", "directory": str(tmp_path)}),
+        ("save", "save_messages", {"directory": "chat-export"}),
+        ("read", "read_file", {"path": "chat-export/0003-0_tool.txt"}),
+    ]
+    real.upstream.script = [
+        Upstream.tools([("previous", "bash", {"command": "echo committed", "directory": str(tmp_path)})]),
+        Upstream.tools(batch),
+        Upstream.text("I read the export."),
+    ]
+    h = harness(tools=runner(tmp_path))
+    image_hash = h.client.upload_image(PNG, "diagram.png").hash
+    key = h.state.begin_send("save this chat", (image_hash,))
+    h.controller.send(key, "save this chat", (image_hash,))
+    h.wait_settled(15)
+
+    assert sorted(p.name for p in destination.iterdir()) == [
+        "0000-0_system.txt", "0001-0_user.txt", "0001-1_user.png", "0002_assistant.txt", "0002_assistant_calls.json",
+        "0003-0_tool.txt", "0004_assistant.txt", "0004_assistant_calls.json",
+    ]  # no accepted but uncommitted tool result, including the earlier bash call in the batch
+    assert (destination / "0001-1_user.png").read_bytes() == PNG
+    assert json.loads((destination / "0004_assistant_calls.json").read_text(encoding="utf-8")) == [
+        {"id": cid, "name": name, "arguments": args} for cid, name, args in batch
+    ]
+    results = tool_message_texts(h)
+    assert "<stdout>pending\n</stdout>" in results["pending"]
+    assert (destination / "0003-0_tool.txt").read_text(encoding="utf-8") == results["previous"]
+    assert results["save"] == f"Saved 5 messages (8 files) to {destination}"
+    assert f"<content>{results['previous']}</content>" in results["read"]
+    assert h.store.journal_get(h.scope, h.session.id, "save").state == JOURNAL_POSTED
+    assert h.shown()[-1][2] == "I read the export."
+
+
 def test_stop_ends_a_command_with_the_real_backend(real, harness, tmp_path):
     pid_file = tmp_path / "pid"
     real.upstream.script = [Upstream.tools([("call_a", "bash", {"command": f"sleep 60 & echo $! > {pid_file}; sleep 60", "directory": str(tmp_path)})])]

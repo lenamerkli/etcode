@@ -90,7 +90,7 @@ CLIENT_TOOLS: list[dict[str, Any]] = [{'name': 'bash',
                  'required': ['path', 'search', 'replace']}},
  {'name': 'interactive_terminal',
   'description': 'Instead of just running a command and getting stdout and stderr, this tool allows for all '
-                 'functionality of a terminal including TUIs.',
+                 'functionality of an interactive terminal including TUIs.',
   'parameters': {'type': 'object',
                  'properties': {'session': {'type': 'string',
                                             'description': 'A terminal ID scoped to this chat. A new ID '
@@ -111,6 +111,15 @@ CLIENT_TOOLS: list[dict[str, Any]] = [{'name': 'bash',
                                                          'for a new session and preserves the current size '
                                                          'otherwise.'}},
                  'required': ['session', 'actions']}},
+ {'name': 'save_messages',
+  'description': "Save the current chat's committed history as text, images, and tool-call JSON files "
+                 'inside the VM.',
+  'parameters': {'type': 'object',
+                 'properties': {'directory': {'type': 'string',
+                                              'description': 'A new directory to create. Relative paths are '
+                                                             'relative to the VM home directory. Existing paths '
+                                                             'are not overwritten.'}},
+                 'required': ['directory']}},
  {'name': 'view_image',
   'description': 'View a png, jpeg or webp image.',
   'parameters': {'type': 'object',

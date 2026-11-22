@@ -64,8 +64,8 @@ joined where it is. Sessions you opened keep working in the background while you
 
 ## Tools
 
-The model works in the VM through six tools. The app runs them **automatically** (there is no
-confirmation step: the VM is the sandbox, and the user `agent` has passwordless sudo anyway).
+The model's VM tools run **automatically** (there is no confirmation step: the VM is the sandbox,
+and the user `agent` has passwordless sudo anyway).
 
 | Tool | What it does |
 | --- | --- |
@@ -75,9 +75,11 @@ confirmation step: the VM is the sandbox, and the user `agent` has passwordless 
 | `write_to_file` | Writes a whole file (atomically, keeping its mode) and creates missing directories. |
 | `replace_in_file` | Replaces **every** occurrence of a text in a file and reports where each one was. |
 | `view_image` | Uploads a PNG, JPEG or WebP image so that the model can see it. |
+| `save_messages` | Exports the current chat's committed history to a new directory inside the VM. |
 
 `websearch` is run by the backend, not in the VM: the client asks the backend to execute it through
-`POST /session/<id>/tool-calls/<call_id>/run`. The exact result formats are in [PLAN.md](PLAN.md) (section 5.5).
+`POST /session/<id>/tool-calls/<call_id>/run`. See [PLAN.md](PLAN.md) (section 5.5) for tool result
+formats and [below](#exporting-chat-history) for `save_messages`.
 Relative paths are relative to the home directory. `~` is the home directory.
 
 * **One at a time, in model order.** The calls of one message run strictly one after another, in the
@@ -102,6 +104,26 @@ Relative paths are relative to the home directory. `~` is the home directory.
   because the session waits for a result for every call.
 * The command does not get the app's `ETCODE_API_TOKEN`. But it runs as the same user, so it can read the
   token file. Use a token that is dedicated to etcode VMs.
+
+### Exporting chat history
+
+`save_messages({"directory": "chat-export"})` creates `~/chat-export` in the VM and returns the
+path and the message and file counts. The path must not already exist, even as an empty directory
+or symlink. Missing parent directories are created. If a download or write fails, no partial export
+is published. The files are private and can contain sensitive conversation text, tool arguments,
+and tool output.
+
+System, user, and tool messages produce one file per content part, such as `0001-0_user.txt` and
+`0001-1_user.png`. Names use the backend's message index (at least four digits) and the zero-based
+part index. Sort both indices numerically. Text is UTF-8, and PNG, JPEG (`.jpg`), WebP, and GIF
+images are saved as their original bytes. Assistant text is saved as `0002_assistant.txt`, with
+an additional `0002_assistant_calls.json` containing the ordered calls when present. Assistant
+reasoning and other metadata are not exported. See [the example layout](SAVE_MESSAGES_PLAN.md#file-format).
+
+The export contains only messages committed when the tool fetches history, including the assistant
+message that made the call. It excludes queued messages, live output, and the current batch's tool
+results, even if an earlier result in the batch has already been accepted. A later tool in the batch
+can immediately read the finished export.
 
 ## Using the window
 

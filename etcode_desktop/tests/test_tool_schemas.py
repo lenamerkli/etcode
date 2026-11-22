@@ -10,7 +10,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "etcode_backend"
 
 
 def test_the_client_tools_are_known():
-    assert TOOL_NAMES == {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "view_image"}
+    assert TOOL_NAMES == {"bash", "interactive_terminal", "read_file", "write_to_file", "replace_in_file", "save_messages", "view_image"}
     assert "websearch" not in TOOL_NAMES  # the backend runs it
 
 
@@ -37,6 +37,7 @@ def test_defaults_are_filled_in():
     assert validate_arguments("replace_in_file", {"path": "a", "search": "x", "replace": "y"}) == {"path": "a", "search": "x", "replace": "y"}
     assert validate_arguments("write_to_file", {"path": "a", "content": ""}) == {"path": "a", "content": ""}
     assert validate_arguments("view_image", {"path": "i.png"}) == {"path": "i.png"}
+    assert validate_arguments("save_messages", {"directory": "export"}) == {"directory": "export"}
 
 
 def test_given_values_win_over_defaults():
@@ -66,6 +67,8 @@ def test_integral_floats_are_integers_but_booleans_are_not():
     ("replace_in_file", {"path": "a", "search": "x"}, "missing required argument 'replace'"),
     ("replace_in_file", {"path": "a", "search": "x", "replace": "y", "read": "yes"}, "'read' must be true or false"),
     ("view_image", {}, "missing required argument 'path'"),
+    ("save_messages", {}, "missing required argument 'directory'"),
+    ("save_messages", {"directory": 5}, "'directory' must be a string"),
 ])
 def test_bad_arguments_say_what_is_wrong(tool, arguments, message):
     with pytest.raises(ToolArgumentError, match=message):
